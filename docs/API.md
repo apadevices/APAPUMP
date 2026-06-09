@@ -224,7 +224,7 @@ Returns the current state machine state.
 bool isFreezeActive() const;
 ```
 
-Returns `true` when freeze protection is currently forcing the pump on. Use to display a freeze indicator on the HMI.
+Returns `true` when freeze protection is active (temperature below threshold). The pump may be in the rest phase of its cycle — use `isRunning()` to know whether the relay is actually on. Use to display a freeze indicator on the HMI.
 
 ---
 
@@ -540,7 +540,7 @@ void enableFreezeProtection(float (*tempCb)(),
                              float thresholdC = APAPUMP_FREEZE_THRESHOLD_C);
 ```
 
-Enable freeze protection at Priority 4. When `tempCb()` returns a value below `thresholdC` (default 4.5 °C), the pump runs continuously to prevent pipe freeze. `tempCb` returns `°C`; return `-1.0f` when sensor is not ready (protection stays inactive).
+Enable freeze protection at Priority 4. When `tempCb()` returns a value below `thresholdC` (default 4.5 °C), the pump **cycles** to prevent pipe freeze: it runs for `APAPUMP_FREEZE_ON_SEC` (5 min), then rests for `APAPUMP_FREEZE_OFF_SEC` (10 min), repeating until temperature rises above threshold. Brief periodic circulation is sufficient to prevent freezing and saves significant energy over continuous operation. `tempCb` returns `°C`; return `-1.0f` when sensor is not ready (protection stays inactive).
 
 **Dry-run interlock:** if `enablePressure()` is active, pressure is calibrated, and the EMA baseline confirms no water in the pipes, freeze protection is suppressed — forcing the pump on dry would damage the motor.
 
@@ -552,7 +552,7 @@ Enable freeze protection at Priority 4. When `tempCb()` returns a value below `t
 bool isFreezeActive() const;
 ```
 
-Returns `true` when freeze protection is currently forcing the pump on.
+Returns `true` when freeze protection is active (temperature below threshold). The pump cycles on/off — use `isRunning()` to check the actual relay state.
 
 ---
 
@@ -641,13 +641,15 @@ All non-NONE alarms are latching — call `acknowledgeAlarm()` to clear.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `APAPUMP_VERSION` | `"1.0.0"` | Library version string |
+| `APAPUMP_VERSION` | `"1.0.1"` | Library version string |
 | `APAPUMP_MIN_OFF_SEC` | 60 | Minimum pause after pump stops (non-manual) |
 | `APAPUMP_MIN_RUN_SEC` | 300 | Default minimum run time before stopping |
 | `APAPUMP_VALVE_PULSE_MS` | 500 | Default pulse width for `VALVE_PULSE` mode |
 | `APAPUMP_CURRENT_SAMPLE_MS` | 10 000 | EMA sample interval (ms) — current + pressure |
 | `APAPUMP_CURRENT_SETTLE_SEC` | 30 | Seconds after pump-on before EMA sampling starts |
 | `APAPUMP_FREEZE_THRESHOLD_C` | 4.5 | Default freeze protection temperature (°C) |
+| `APAPUMP_FREEZE_ON_SEC` | 300 | Freeze cycle: pump run duration (5 min) |
+| `APAPUMP_FREEZE_OFF_SEC` | 600 | Freeze cycle: rest between runs (10 min) |
 | `APAPUMP_PRESSURE_DRYRUN_PCT` | 40 | Pressure must be ≥ this % of EMA baseline to confirm flow |
 | `APAPUMP_PRESSURE_ABS_MIN` | 0.1 | Absolute minimum pressure (bar) used before EMA builds |
 
