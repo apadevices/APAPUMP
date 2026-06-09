@@ -1,7 +1,7 @@
 # APAPUMP
 
 <p align="center">
-<img src="extras/apapump.png" width="600" alt="APAPUMP">
+<img src="extras/apapump-logo.png" width="600" alt="APAPUMP">
 </p>
 
 **Autonomous filtration pump controller for APA Devices pool automation**
@@ -89,9 +89,10 @@ Out of the box, the zero-arg constructor targets the APA Devices HMI board v1.0:
                                 │                                   │
                    UVC pre-delay (default 5 s)                      │
                                 │                                   │
-                          [ RUNNING ] ◄── safety alarms checked     │
-                                │         (current / pressure /     │
-                   _shouldPumpRun() = false   flow / freeze)        │
+                          [ RUNNING ] ◄── safety alarms checked:   │
+                                │         current · pressure ·     │
+                                │         flow · freeze            │
+                   _shouldPumpRun() = false                         │
                    min run time OK (300 s)                          │
                                 │                                   │
                          [ STOPPING ]                               │
@@ -178,7 +179,7 @@ ApaPump pump(RELAY_DIRECT, 7);               // pump on pin 7
 
 // Active-low relay (some modules)
 ApaPump pump(RELAY_DIRECT, 7);
-// pump.setActiveLow();  ← call BEFORE pump.begin()
+pump.setActiveLow();             // call BEFORE pump.begin()
 
 // Multiple relays, direct GPIO
 ApaPump pump(RELAY_DIRECT, 7, 8, 9, 10);    // pump=7, uvc=8, aux=9, valve=10
