@@ -27,7 +27,7 @@
 #include <Wire.h>
 
 // ---- Version ----------------------------------------------------------------
-#define APAPUMP_VERSION "1.0.0"
+#define APAPUMP_VERSION "1.0.1"
 
 // ---- EEPROM base address (12 bytes: 520–531) --------------------------------
 // APA library address map — do not overlap these ranges:
@@ -63,9 +63,11 @@ constexpr uint32_t APAPUMP_CURRENT_SAMPLE_MS  = 10000; // EMA sample interval (c
 constexpr uint16_t APAPUMP_CURRENT_SETTLE_SEC = 30;    // seconds after pump-on before EMA sampling starts
 
 // Phase 2 — pressure safety and freeze protection
-constexpr float   APAPUMP_FREEZE_THRESHOLD_C  = 4.5f; // freeze protection activates below this pool temp (°C)
-constexpr uint8_t APAPUMP_PRESSURE_DRYRUN_PCT = 40;   // pressure must be >= this % of EMA baseline to confirm flow
-constexpr float   APAPUMP_PRESSURE_ABS_MIN    = 0.1f; // absolute min pressure (bar) used before EMA is built
+constexpr float    APAPUMP_FREEZE_THRESHOLD_C  = 4.5f; // freeze protection activates below this pool temp (°C)
+constexpr uint16_t APAPUMP_FREEZE_ON_SEC       = 300;  // freeze cycle: pump run duration (5 min)
+constexpr uint16_t APAPUMP_FREEZE_OFF_SEC      = 600;  // freeze cycle: rest between runs (10 min)
+constexpr uint8_t  APAPUMP_PRESSURE_DRYRUN_PCT = 40;   // pressure must be >= this % of EMA baseline to confirm flow
+constexpr float    APAPUMP_PRESSURE_ABS_MIN    = 0.1f; // absolute min pressure (bar) used before EMA is built
 
 // ---- Enums ------------------------------------------------------------------
 
@@ -296,7 +298,8 @@ public:
 
     // ---- Phase 2: freeze protection, pressure safety, flow, catch-up --------
 
-    /** Enable freeze protection: pump runs continuously when pool temp < thresholdC.
+    /** Enable freeze protection: pump cycles ON/OFF when pool temp < thresholdC.
+     *  Cycle: APAPUMP_FREEZE_ON_SEC on, APAPUMP_FREEZE_OFF_SEC rest (default 5 min / 10 min).
      *  Dry-run interlock: if pressure is enabled and calibrated and EMA shows no flow,
      *  freeze protection is suppressed (pipes drained — forcing pump on would damage motor).
      *  tempCb returns °C; return -1.0f when sensor not ready (protection stays inactive). */
@@ -350,6 +353,7 @@ private:
         uint8_t auxRunning          : 1;  // AUX relay is currently on
         uint8_t freezeEnabled       : 1;
         uint8_t freezeActive        : 1;  // freeze protection currently forcing pump on
+        uint8_t freezeCycleOn       : 1;  // freeze cycle: currently in run phase (not rest)
         uint8_t pressurePeakEnabled : 1;  // overpressure alarm armed
         uint8_t flowEnabled         : 1;  // flow switch callback registered
         uint8_t catchupWindow       : 1;  // catch-up restricted to a time window
