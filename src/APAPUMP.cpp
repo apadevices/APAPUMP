@@ -248,6 +248,22 @@ void ApaPump::update() {
         }
     }
 
+    // ---- Freeze cycle phase management -------------------------------------
+    // Reuses existing _pumpStartMs / _pumpStopMs — no extra timestamp needed.
+    if (_flags.freezeActive) {
+        if (_flags.freezeCycleOn) {
+            // Run phase: switch to rest after FREEZE_ON_SEC from pump-on
+            if (_pumpState == RUNNING &&
+                now - _pumpStartMs >= (uint32_t)APAPUMP_FREEZE_ON_SEC * 1000UL)
+                _flags.freezeCycleOn = 0;
+        } else {
+            // Rest phase: switch to run after FREEZE_OFF_SEC from pump-off
+            if (_pumpState == IDLE &&
+                now - _pumpStopMs >= (uint32_t)APAPUMP_FREEZE_OFF_SEC * 1000UL)
+                _flags.freezeCycleOn = 1;
+        }
+    }
+
     // ---- Normal priority engine (only valid in steady states) --------------
     if (_pumpState != IDLE && _pumpState != RUNNING) return;
 
@@ -308,13 +324,15 @@ bool ApaPump::_shouldPumpRun() {
             }
             if (waterPresent) {
                 if (!_flags.freezeActive) {
-                    _flags.freezeActive = 1;
+                    _flags.freezeActive  = 1;
+                    _flags.freezeCycleOn = 1;   // start in run phase immediately
                     _fireStatus(F("Freeze protection active"));
                 }
-                return true;
+                return _flags.freezeCycleOn;
             }
         } else if (_flags.freezeActive) {
-            _flags.freezeActive = 0;
+            _flags.freezeActive  = 0;
+            _flags.freezeCycleOn = 0;
             _fireStatus(F("Freeze protection deactivated"));
         }
     }
