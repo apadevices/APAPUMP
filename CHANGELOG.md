@@ -1,5 +1,15 @@
 # Changelog — APAPUMP
 
+## [1.0.1] — 2026-06-09
+
+### Fixed
+
+- **Freeze protection now cycles instead of running continuously.** When pool temp drops below threshold, the pump runs for `APAPUMP_FREEZE_ON_SEC` (5 min default) then rests for `APAPUMP_FREEZE_OFF_SEC` (10 min default), repeating until temp rises. Brief periodic circulation is sufficient to prevent pipe freeze and saves significant energy compared to continuous operation. Override defaults via `build_flags`: `-DAPAPUMP_FREEZE_ON_SEC=180`.
+- Cycle timing reuses existing `_pumpStartMs` / `_pumpStopMs` timestamps — zero extra SRAM.
+- Fixed `setActiveLow()` example in README: the call was shown commented-out, implying it was optional rather than required.
+- Fixed state machine diagram: alarm list annotation was merged onto the `_shouldPumpRun() = false` line, making both unreadable.
+- Fixed README logo path (`apapump.png` → `apapump-logo.png`).
+
 ## [1.0.0] — 2026-06-05
 
 ### Added
