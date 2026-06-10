@@ -77,26 +77,26 @@ Out of the box, the zero-arg constructor targets the APA Devices HMI board v1.0:
 ### State machine
 
 ```
-                                ┌─────────────────────────────────┐
+                                ┌──────────────────────────────────┐
                                 │           pump.begin()           │
-                                ▼                                   │
-                             [ IDLE ]                               │
-                                │                                   │
-                   _shouldPumpRun() = true                          │
-                   min OFF time OK (60 s)                           │
-                                │                                   │
-                          [ STARTING ]                              │
-                                │                                   │
-                   UVC pre-delay (default 5 s)                      │
-                                │                                   │
+                                ▼                                  │
+                             [ IDLE ]                              │
+                                │                                  │
+                   _shouldPumpRun() = true                         │
+                   min OFF time OK (60 s)                          │
+                                │                                  │
+                          [ STARTING ]                             │
+                                │                                  │
+                   UVC pre-delay (default 5 s)                     │
+                                │                                  │
                           [ RUNNING ] ◄── safety alarms checked:   │
                                 │         current · pressure ·     │
                                 │         flow · freeze            │
-                   _shouldPumpRun() = false                         │
-                   min run time OK (300 s)                          │
-                                │                                   │
-                         [ STOPPING ]                               │
-                                │                                   │
+                   _shouldPumpRun() = false                        │
+                   min run time OK (300 s)                         │
+                                │                                  │
+                         [ STOPPING ]                              │
+                                │                                  │
           AUX lead ──► pump OFF ──► UVC post-delay ────────────────┘
 ```
 
