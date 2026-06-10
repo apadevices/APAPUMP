@@ -1,5 +1,14 @@
 # Changelog — APAPUMP
 
+## [1.0.2] — 2026-06-10
+
+### Fixed
+
+- Fixed state machine diagram alignment in README (consistent right-border column throughout).
+- Fixed freeze protection feature bullet: "continuous run" → "cyclic run (5 min ON / 10 min rest)" to match v1.0.1 behaviour.
+- Fixed SRAM footprint callout: now references Arduino Uno (2 KB) instead of Mega to better reflect the lightweight design goal.
+- Added "Wiring a buzzer or alarm output" section to README showing the alarm callback pattern for physical indicators.
+
 ## [1.0.1] — 2026-06-09
 
 ### Fixed
