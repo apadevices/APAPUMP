@@ -39,12 +39,12 @@
 - **Overcurrent** — EMA-learned baseline × 1.5 threshold; cold-start gate of 5 samples
 - **Dry-run** — pressure below EMA baseline × 40% (or absolute minimum before EMA builds)
 - **Overpressure** — absolute hard limit at `maxPressure` AND EMA-relative dirty-filter detection
-- **Freeze protection** — pool temp below 4.5 °C → continuous run; suppressed if dry-run detected
+- **Freeze protection** — pool temp below 4.5 °C → cyclic run (5 min ON / 10 min rest); suppressed if dry-run detected
 - **No-flow stub** — flow switch confirmed after settle; hardware-ready for future sensor
 - All alarms are latching — explicit `acknowledgeAlarm()` required
 
 ### Engineering
-- **564 B SRAM** on Mega 2560 with all features registered
+- **564 B SRAM** on Arduino Uno with all features registered — fits comfortably in 2 KB
 - 23 boolean flags packed into 3 bytes; all string literals in flash (`F()` macro)
 - EEPROM: 12 bytes, magic + version + checksum validation, persists target and clean pressure
 - Zero `delay()` calls — every path returns within one `loop()` iteration
@@ -363,6 +363,21 @@ pump.setPumpAlarmCallback([](PumpAlarm alarm) {
 });
 ```
 
+### Wiring a buzzer or alarm output
+
+The alarm callback is the right place to drive any physical indicator — buzzer, LED, relay. No extra library method needed:
+
+```cpp
+pump.setPumpAlarmCallback([](PumpAlarm alarm) {
+    bool active = (alarm != PUMP_ALARM_NONE);
+    digitalWrite(5, active ? HIGH : LOW);   // buzzer on pin 5
+    // LEDs on a PCF expander — drive via APASENSE:
+    // adc.setLed(4, active);
+});
+```
+
+> **Tip:** if you use APALCDGUI, a future release will add `gui.setBuzzerPin(pin)` to drive the buzzer automatically from the alert level (INFO / WARNING / CRITICAL) without any sketch code.
+
 ### Dry-run protection
 
 When `enablePressure()` is registered, APAPUMP builds a dual pressure baseline (EMA): one for normal running, one for when the solar valve is open (higher pressure expected due to absorber resistance). After 5 pump runs, if pressure stays near zero after 30 s, `PUMP_ALARM_LOW_PRESSURE` fires.
@@ -378,7 +393,7 @@ pump.enableFreezeProtection(
 );
 ```
 
-When pool temperature drops below the threshold, the pump runs continuously to prevent pipes from freezing. **Dry-run interlock:** if the pressure sensor is enabled, calibrated, and indicates no water in the pipes (pressure near zero), freeze protection is suppressed — forcing the pump without water would burn the motor.
+When pool temperature drops below the threshold, the pump **cycles** to prevent pipes from freezing: runs for `APAPUMP_FREEZE_ON_SEC` (default 5 min), rests for `APAPUMP_FREEZE_OFF_SEC` (default 10 min), and repeats until temperature rises. Both durations are overridable via `build_flags`. **Dry-run interlock:** if the pressure sensor is enabled, calibrated, and indicates no water in the pipes (pressure near zero), freeze protection is suppressed — forcing the pump without water would burn the motor.
 
 ---
 
