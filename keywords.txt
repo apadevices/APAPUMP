@@ -1,0 +1,88 @@
+# APAPUMP — Keyword definitions for Arduino IDE syntax highlighting
+# Format: KEYWORD{TAB}KEYWORD_TYPE
+# KEYWORD1 = class/type names (orange)
+# KEYWORD2 = methods/functions (orange)
+# LITERAL1  = constants/enum values (teal)
+
+#######################################
+# Class
+#######################################
+
+ApaPump	KEYWORD1
+
+#######################################
+# Methods
+#######################################
+
+begin	KEYWORD2
+update	KEYWORD2
+setActiveLow	KEYWORD2
+setExtraOutput	KEYWORD2
+getExtraOutput	KEYWORD2
+setManualMode	KEYWORD2
+getManualMode	KEYWORD2
+setManualTimeout	KEYWORD2
+setManualAutoReset	KEYWORD2
+isRunning	KEYWORD2
+getState	KEYWORD2
+isFreezeActive	KEYWORD2
+getPressureBaseline	KEYWORD2
+setPumpStateCallback	KEYWORD2
+setPumpAlarmCallback	KEYWORD2
+acknowledgeAlarm	KEYWORD2
+getAlarm	KEYWORD2
+setStatusCallback	KEYWORD2
+setMinRunTime	KEYWORD2
+enableUVC	KEYWORD2
+enableAux	KEYWORD2
+enableSolar	KEYWORD2
+setSolarDayNight	KEYWORD2
+setCurrentCallback	KEYWORD2
+resetCurrentBaseline	KEYWORD2
+enablePressure	KEYWORD2
+getPressure	KEYWORD2
+isPressureCalibrated	KEYWORD2
+setFilterThresholds	KEYWORD2
+learnCleanPressure	KEYWORD2
+setCleanPressure	KEYWORD2
+getCleanPressure	KEYWORD2
+getFilterStatus	KEYWORD2
+setDailyTarget	KEYWORD2
+getDailyRuntimeMinutes	KEYWORD2
+isDailyTargetMet	KEYWORD2
+resetDailyCounter	KEYWORD2
+setMidnightCallback	KEYWORD2
+enableFreezeProtection	KEYWORD2
+setPressurePeakAlarm	KEYWORD2
+setFlowCallback	KEYWORD2
+setCatchupWindow	KEYWORD2
+
+#######################################
+# Enums and constants
+#######################################
+
+RELAY_DIRECT	LITERAL1
+RELAY_PCF	LITERAL1
+
+AUTO	LITERAL1
+FORCE_ON	LITERAL1
+FORCE_OFF	LITERAL1
+
+IDLE	LITERAL1
+STARTING	LITERAL1
+RUNNING	LITERAL1
+STOPPING	LITERAL1
+
+VALVE_SUSTAINED	LITERAL1
+VALVE_PULSE	LITERAL1
+
+FILTER_UNKNOWN	LITERAL1
+FILTER_CLEAN	LITERAL1
+FILTER_FILLING	LITERAL1
+FILTER_BACKWASH_NEEDED	LITERAL1
+
+PUMP_ALARM_NONE	LITERAL1
+PUMP_ALARM_OVERCURRENT	LITERAL1
+PUMP_ALARM_LOW_PRESSURE	LITERAL1
+PUMP_ALARM_HIGH_PRESSURE	LITERAL1
+PUMP_ALARM_NO_FLOW	LITERAL1
