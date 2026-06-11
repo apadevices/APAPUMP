@@ -1,5 +1,12 @@
 # Changelog — APAPUMP
 
+## [1.0.3] — 2026-06-11
+
+### Fixed
+
+- Updated "Wiring a buzzer or alarm output" section to show both a direct GPIO pattern and the recommended APASENSE integration (`alert(BUZZER_ALARM, true)` / `stopAlert()`).
+- Fixed commented `setLed` example: index corrected from 4 to 0 (APASENSE LED index is 0–3, mapping to PCF P4–P7).
+
 ## [1.0.2] — 2026-06-10
 
 ### Fixed
