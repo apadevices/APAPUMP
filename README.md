@@ -365,18 +365,27 @@ pump.setPumpAlarmCallback([](PumpAlarm alarm) {
 
 ### Wiring a buzzer or alarm output
 
-The alarm callback is the right place to drive any physical indicator — buzzer, LED, relay. No extra library method needed:
+The alarm callback is the right place to drive any physical indicator — buzzer, LED, relay. No extra library method needed.
 
+**Direct GPIO (no APASENSE):**
 ```cpp
 pump.setPumpAlarmCallback([](PumpAlarm alarm) {
     bool active = (alarm != PUMP_ALARM_NONE);
     digitalWrite(5, active ? HIGH : LOW);   // buzzer on pin 5
-    // LEDs on a PCF expander — drive via APASENSE:
-    // adc.setLed(4, active);
 });
 ```
 
-> **Tip:** if you use APALCDGUI, a future release will add `gui.setBuzzerPin(pin)` to drive the buzzer automatically from the alert level (INFO / WARNING / CRITICAL) without any sketch code.
+**With APASENSE** (v1.1.0+, recommended for APA hardware):
+```cpp
+pump.setPumpAlarmCallback([](PumpAlarm alarm) {
+    bool active = (alarm != PUMP_ALARM_NONE);
+    adc.setLed(0, active);                      // LED0 = PCF P4
+    if (active) adc.alert(BUZZER_ALARM, true);  // repeating alarm pattern
+    else         adc.stopAlert();               // silence when alarm clears
+});
+```
+
+> **Tip:** APASENSE owns the PCF expander LEDs and buzzer. `alert(BUZZER_ALARM, true)` plays a repeating triple-beep until `stopAlert()` is called — no delay() or manual timer needed.
 
 ### Dry-run protection
 
