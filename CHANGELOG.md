@@ -1,5 +1,31 @@
 # Changelog — APAPUMP
 
+## [1.1.0] — 2026-09-30
+
+### Added
+
+- **Filter status is now real.** `getFilterStatus()` returns `FILTER_CLEAN` / `FILTER_FILLING` / `FILTER_BACKWASH_NEEDED` from the rise of the running pressure (solar valve closed) above the clean-filter pressure — previously it always returned `FILTER_UNKNOWN`. Status only, no alarm.
+- **Clean pressure learned automatically** on the first run after installation (first stable baseline, ~80 s of running, pump running with solar valve closed, at least 0.1 bar) and saved to EEPROM.
+- New overridable constants (`build_flags`): `APAPUMP_FILTER_WARN_DELTA` (0.4 bar), `APAPUMP_FILTER_BACKWASH_DELTA` (0.8 bar), `APAPUMP_CURRENT_MIN_A` (0.5 A).
+- README: new sections "Filter status — when to backwash", "Overcurrent protection" (incl. direct drive vs. external contactor) and "Stopping the pump on an alarm".
+
+### Changed
+
+- `learnCleanPressure()` no longer copies one raw reading (a spike, or a stopped pump, could be stored). It clears the stored value and restarts the valve-closed baseline; the next ~80 s of running learns the new clean pressure. With the pump off, it waits for the next run.
+- Default filter thresholds 0.3 / 0.6 bar → 0.4 / 0.8 bar (household pools).
+- Current readings below `APAPUMP_CURRENT_MIN_A` (0.5 A) are ignored: no motor on the sensor (noise, or only an external contactor's coil). Overcurrent protection stays silent instead of learning noise and raising false alarms.
+- `setCleanPressure()` clamps negative values to 0 (= not learned).
+
+### Fixed
+
+- **Safety: learned baselines kept learning during an alarm.** The library does not stop the pump on an alarm, so a dry-running pump taught the pressure baseline ~0 bar within ~50 s — after `acknowledgeAlarm()` the dry-run check (`pressure < baseline × 40 %`) could never fire again until reboot. An overcurrent likewise raised its own threshold. Now neither baseline is updated while an alarm is active, and pressure below `APAPUMP_PRESSURE_ABS_MIN` (0.1 bar) is never learned.
+- **Baselines no longer rest on one reading.** The start-up EMA was seeded with the first sample and kept ~81 % of it after 5 samples (weight 5 %), so one spike at 30 s could set the dry-run, overcurrent and clean-filter reference. The first 5 samples are now averaged, then the slow EMA takes over.
+- Docs: the relative high-pressure alarm (`setPressurePeakAlarm()`) was described as dirty-filter detection. Its baseline follows slow changes within minutes, so it only catches **sudden** rises — filter clogging is reported by `getFilterStatus()`.
+- Docs: overcurrent is checked with each 10 s current sample, not "every update() tick".
+- Docs: `getPressureBaseline()` needs 5 samples (~80 s of running), not "5 pump runs".
+- Docs + example 03: post-shock bridge uses an elapsed-time check (the old `millis() < until` form breaks when `millis()` wraps); `maxPressure` example 4.0 → 2.5 bar (household filter rating).
+- EEPROM address map updated: APADOSE 192–291 (25 B × 4), APASENSE 582–587.
+
 ## [1.0.3] — 2026-06-11
 
 ### Fixed

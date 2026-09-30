@@ -46,7 +46,7 @@ ApaPump::ApaPump()
     _yesterdayRuntimeMin = 0; _lastAccumMs         = 0;
     _lastEpochDay      = 0xFFFF;
     _maxPressure       = 0.0f; _cleanPressure       = 0.0f;
-    _filterWarningDelta = 0.3f; _filterBackwashDelta = 0.6f;
+    _filterWarningDelta = APAPUMP_FILTER_WARN_DELTA; _filterBackwashDelta = APAPUMP_FILTER_BACKWASH_DELTA;
     _lastPressure      = -1.0f;
     _currentEma        = 0.0f; _currentSampleCount  = 0;
     _pressureEmaNormal      = 0.0f; _pressureEmaSolar       = 0.0f;
@@ -96,7 +96,7 @@ ApaPump::ApaPump(RelayDriver mode, uint8_t a,
     _yesterdayRuntimeMin = 0; _lastAccumMs         = 0;
     _lastEpochDay      = 0xFFFF;
     _maxPressure       = 0.0f; _cleanPressure       = 0.0f;
-    _filterWarningDelta = 0.3f; _filterBackwashDelta = 0.6f;
+    _filterWarningDelta = APAPUMP_FILTER_WARN_DELTA; _filterBackwashDelta = APAPUMP_FILTER_BACKWASH_DELTA;
     _lastPressure      = -1.0f;
     _currentEma        = 0.0f; _currentSampleCount  = 0;
     _pressureEmaNormal      = 0.0f; _pressureEmaSolar       = 0.0f;
@@ -171,7 +171,9 @@ void ApaPump::update() {
     }
 
     // ---- EMA tick (10 s after inrush settle, pump running) -----------------
-    if (_pumpState == RUNNING &&
+    // Never while an alarm is active: the pump keeps running on an alarm unless the
+    // sketch stops it, and a dry run or an overcurrent must not become the new "normal".
+    if (_pumpState == RUNNING && !_flags.alarmActive &&
         (now - _pumpStartMs) >= (uint32_t)APAPUMP_CURRENT_SETTLE_SEC * 1000UL &&
         (now - _lastEmaMs)   >= APAPUMP_CURRENT_SAMPLE_MS) {
         _lastEmaMs = now;
@@ -578,13 +580,15 @@ void ApaPump::_updateCurrentEma() {
     if (!_flags.currentEnabled || !_currentCb) return;
 
     float measured = _currentCb();
-    if (measured < 0.0f) return;
+    // Also rejects -1.0f (sensor not ready). Below the floor there is no motor on the
+    // sensor: noise would become the baseline and its spikes would read as overcurrent.
+    if (measured < APAPUMP_CURRENT_MIN_A) return;
 
+    // Cold start: plain average of the first samples (an EMA seeded with the first
+    // sample would keep ~81 % of that one reading), then the slow EMA.
     if (_currentSampleCount < CURRENT_COLD_START_SAMPLES) {
         _currentSampleCount++;
-        _currentEma = (_currentSampleCount == 1)
-                      ? measured
-                      : _currentEma + CURRENT_EMA_ALPHA * (measured - _currentEma);
+        _currentEma += (measured - _currentEma) / _currentSampleCount;
         if (_currentSampleCount >= CURRENT_COLD_START_SAMPLES) _flags.baselineReady = 1;
     } else {
         _currentEma += CURRENT_EMA_ALPHA * (measured - _currentEma);
@@ -606,27 +610,30 @@ void ApaPump::_updateCurrentEma() {
 void ApaPump::_updatePressureEma() {
     // Called from update() EMA tick gate — timing and state guards handled by caller
     if (!_flags.pressureEnabled || !_pressureCb) return;
-    if (_lastPressure < 0.0f) return;  // not yet calibrated
+    // Also rejects -1.0f (not calibrated). A running pump below this is dry: learning it
+    // would drop the baseline to ~0 and disable the dry-run check.
+    if (_lastPressure < APAPUMP_PRESSURE_ABS_MIN) return;
 
     bool valveOpen = _flags.solarValveEnabled && _isRelayOn(3);
 
     if (valveOpen) {
-        if (_pressureEmaCountSolar < PRESSURE_COLD_START_SAMPLES) {
+        if (_pressureEmaCountSolar < PRESSURE_COLD_START_SAMPLES) {   // cold start: plain average
             _pressureEmaCountSolar++;
-            _pressureEmaSolar = (_pressureEmaCountSolar == 1)
-                                ? _lastPressure
-                                : _pressureEmaSolar + CURRENT_EMA_ALPHA * (_lastPressure - _pressureEmaSolar);
+            _pressureEmaSolar += (_lastPressure - _pressureEmaSolar) / _pressureEmaCountSolar;
         } else {
             _pressureEmaSolar += CURRENT_EMA_ALPHA * (_lastPressure - _pressureEmaSolar);
         }
     } else {
-        if (_pressureEmaCountNormal < PRESSURE_COLD_START_SAMPLES) {
+        if (_pressureEmaCountNormal < PRESSURE_COLD_START_SAMPLES) {  // cold start: plain average
             _pressureEmaCountNormal++;
-            _pressureEmaNormal = (_pressureEmaCountNormal == 1)
-                                 ? _lastPressure
-                                 : _pressureEmaNormal + CURRENT_EMA_ALPHA * (_lastPressure - _pressureEmaNormal);
+            _pressureEmaNormal += (_lastPressure - _pressureEmaNormal) / _pressureEmaCountNormal;
         } else {
             _pressureEmaNormal += CURRENT_EMA_ALPHA * (_lastPressure - _pressureEmaNormal);
+        }
+        // First valid baseline after install or learnCleanPressure() = the clean filter.
+        if (_cleanPressure <= 0.0f && _pressureEmaCountNormal >= PRESSURE_COLD_START_SAMPLES) {
+            _cleanPressure = _pressureEmaNormal;
+            _saveEEPROM();
         }
     }
 }
@@ -805,11 +812,28 @@ void ApaPump::enablePressure(float (*pressureCb)(), float maxPressure) {
 float ApaPump::getPressure()          const { return (_lastPressure >= 0.0f) ? _lastPressure : 0.0f; }
 bool  ApaPump::isPressureCalibrated() const { return _flags.pressureEnabled && _lastPressure >= 0.0f; }
 
-void         ApaPump::setFilterThresholds(float w, float b) { _filterWarningDelta = w; _filterBackwashDelta = b; }
-void         ApaPump::learnCleanPressure()                  { if (isPressureCalibrated()) { _cleanPressure = _lastPressure; _saveEEPROM(); } }
-void         ApaPump::setCleanPressure(float bar)           { _cleanPressure = bar; _saveEEPROM(); }
-float        ApaPump::getCleanPressure()       const        { return _cleanPressure; }
-FilterStatus ApaPump::getFilterStatus()        const        { return FILTER_UNKNOWN; }  // Phase 2
+void  ApaPump::setFilterThresholds(float w, float b) { _filterWarningDelta = w; _filterBackwashDelta = b; }
+void  ApaPump::setCleanPressure(float bar)           { _cleanPressure = (bar > 0.0f) ? bar : 0.0f; _saveEEPROM(); }
+float ApaPump::getCleanPressure()       const        { return _cleanPressure; }
+
+// A single reading could be a spike or taken with the pump off — instead restart the
+// valve-closed baseline; _updatePressureEma() stores its first valid value as clean.
+void ApaPump::learnCleanPressure() {
+    if (!_flags.pressureEnabled) return;
+    _cleanPressure          = 0.0f;
+    _pressureEmaNormal      = 0.0f;
+    _pressureEmaCountNormal = 0;
+    _saveEEPROM();   // a reboot before the new value is learned still re-learns
+}
+
+FilterStatus ApaPump::getFilterStatus() const {
+    if (!_flags.pressureEnabled || _cleanPressure <= 0.0f ||
+        _pressureEmaCountNormal < PRESSURE_COLD_START_SAMPLES) return FILTER_UNKNOWN;
+    float rise = _pressureEmaNormal - _cleanPressure;
+    if (rise >= _filterBackwashDelta) return FILTER_BACKWASH_NEEDED;
+    if (rise >= _filterWarningDelta)  return FILTER_FILLING;
+    return FILTER_CLEAN;
+}
 
 void ApaPump::setDailyTarget(uint16_t minutes) { _dailyTargetMin = minutes; _saveEEPROM(); }
 uint16_t ApaPump::getDailyRuntimeMinutes() const { return _dailyRuntimeMin; }

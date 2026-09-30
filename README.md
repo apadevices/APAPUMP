@@ -5,7 +5,7 @@
 </p>
 
 **Autonomous filtration pump controller for APA Devices pool automation**
-· ![v1.0.0](https://img.shields.io/badge/version-1.0.0-blue)
+· ![v1.1.0](https://img.shields.io/badge/version-1.1.0-blue)
 · ![Platforms](https://img.shields.io/badge/platforms-AVR%20ESP8266%20ESP32%20STM32-brightgreen)
 
 ---
@@ -36,12 +36,17 @@
 - **Solar safety (Priority 0):** absorber too hot → pump ON + valve OPEN, overrides even `FORCE_OFF`
 
 ### Safety alarms
-- **Overcurrent** — EMA-learned baseline × 1.5 threshold; cold-start gate of 5 samples
+- **Overcurrent** — learns the pump's own normal current, alarms at × 1.5; no pump rating to enter; silent with an external contactor ([details](#overcurrent-protection))
 - **Dry-run** — pressure below EMA baseline × 40% (or absolute minimum before EMA builds)
-- **Overpressure** — absolute hard limit at `maxPressure` AND EMA-relative dirty-filter detection
+- **Overpressure** — absolute hard limit at `maxPressure` (the filter's rated pressure); optional sudden-rise alarm
+- **Learned baselines never learn a fault** — no learning while an alarm is active, nor from a dry pipe or a motor-less current sensor
 - **Freeze protection** — pool temp below 4.5 °C → cyclic run (5 min ON / 10 min rest); suppressed if dry-run detected
 - **No-flow stub** — flow switch confirmed after settle; hardware-ready for future sensor
 - All alarms are latching — explicit `acknowledgeAlarm()` required
+
+### Filter maintenance
+- **Filter status** — clean / filling / backwash needed, from the pressure rise above the clean-filter pressure ([details](#filter-status--when-to-backwash))
+- Clean pressure learned automatically on the first run; one call after each backwash re-learns it
 
 ### Engineering
 - **564 B SRAM** on Arduino Uno with all features registered — fits comfortably in 2 KB
@@ -339,14 +344,35 @@ pump.setCatchupWindow(8, 20);   // catch-up only between 08:00 and 20:00
 
 ## Safety Alarms
 
-All alarms are **latching** — the pump does not stop automatically (your `alarmCb` decides the action). Call `acknowledgeAlarm()` after investigation to clear.
+All alarms are **latching** — the pump does **not** stop automatically (your sketch decides the action). Call `acknowledgeAlarm()` after investigation to clear.
 
 | Alarm | Triggers when | Requires |
 |-------|--------------|----------|
-| `PUMP_ALARM_OVERCURRENT` | current > learned baseline × 1.5 | `setCurrentCallback()` |
+| `PUMP_ALARM_OVERCURRENT` | current > learned baseline × 1.5 ([details](#overcurrent-protection)) | `setCurrentCallback()` |
 | `PUMP_ALARM_LOW_PRESSURE` | pressure below 40% of EMA baseline (dry-run) | `enablePressure()` |
-| `PUMP_ALARM_HIGH_PRESSURE` | pressure > `maxPressure` OR > EMA × (1+peakPct%) | `enablePressure()` + `setPressurePeakAlarm()` |
+| `PUMP_ALARM_HIGH_PRESSURE` | pressure > `maxPressure` (absolute) | `enablePressure()` with `maxPressure` > 0 |
+| `PUMP_ALARM_HIGH_PRESSURE` | **sudden** rise > baseline × (1 + peakPct %) | `setPressurePeakAlarm()` (off by default) |
 | `PUMP_ALARM_NO_FLOW` | flow switch reports no flow after 30 s settle | `setFlowCallback()` |
+
+Alarm checks run every `update()` once the pump has run 30 s; overcurrent is checked with each 10 s current sample. While an alarm is active, **nothing is learned** — a dry run or an overcurrent never becomes the new "normal".
+
+> **The sudden-rise alarm does not detect a dirty filter.** Its baseline follows slow changes within minutes, so weeks of clogging never trip it — that is what [filter status](#filter-status--when-to-backwash) is for. It catches fast changes such as a valve closed while the pump runs. Turning a multiport valve (e.g. to backwash) while the pump runs can trip it, which is why it is off by default.
+
+### Stopping the pump on an alarm (recommended)
+
+A pump that keeps running dry or overloaded can be destroyed within minutes, so most sketches should stop it. Keep it stopped **while the alarm is active** — `setManualMode(FORCE_OFF)` alone returns to AUTO after the manual timeout and would restart the pump, and the library skips its checks while an alarm is active:
+
+```cpp
+void loop() {
+    pump.update();
+    if (pump.getAlarm() != PUMP_ALARM_NONE && pump.getManualMode() != FORCE_OFF)
+        pump.setManualMode(FORCE_OFF);   // re-asserted until the operator acknowledges
+}
+
+// Operator has checked the pump (HMI button, Serial command, ...):
+pump.acknowledgeAlarm();
+pump.setManualMode(AUTO);
+```
 
 **Alarm callback pattern:**
 
@@ -389,9 +415,77 @@ pump.setPumpAlarmCallback([](PumpAlarm alarm) {
 
 ### Dry-run protection
 
-When `enablePressure()` is registered, APAPUMP builds a dual pressure baseline (EMA): one for normal running, one for when the solar valve is open (higher pressure expected due to absorber resistance). After 5 pump runs, if pressure stays near zero after 30 s, `PUMP_ALARM_LOW_PRESSURE` fires.
+When `enablePressure()` is registered, APAPUMP builds a dual pressure baseline (EMA): one for normal running, one for when the solar valve is open (higher pressure expected due to absorber resistance). One sample is taken every 10 s once the pump has run 30 s; after 5 samples the baseline is ready and `PUMP_ALARM_LOW_PRESSURE` fires when pressure drops below 40 % of it.
 
-Before the EMA baseline builds (first 5 runs), an absolute minimum of 0.1 bar is used.
+Before the baseline is ready, an absolute minimum of 0.1 bar (`APAPUMP_PRESSURE_ABS_MIN`) is used. Readings below 0.1 bar are never learned — a pump running dry cannot teach itself that "no pressure" is normal.
+
+### Filter status — when to backwash
+
+A sand or cartridge filter clogs slowly, and the pressure in front of it rises. `getFilterStatus()` compares the running pressure with the pressure measured when the filter was clean:
+
+| Status | Rise above the clean pressure | Example (clean = 1.0 bar) |
+|--------|------------------------------|---------------------------|
+| `FILTER_CLEAN` | below 0.4 bar | below 1.4 bar |
+| `FILTER_FILLING` | 0.4 bar or more | 1.4 bar or more — backwash soon |
+| `FILTER_BACKWASH_NEEDED` | 0.8 bar or more | 1.8 bar or more — backwash now |
+| `FILTER_UNKNOWN` | no clean pressure or no baseline yet | first ~80 s of running after each boot |
+
+**The clean pressure is learned for you.** On the first run after installation (pump running, solar valve closed, at least 0.1 bar) the library takes its first stable pressure (~80 s of running) as the clean pressure and saves it to EEPROM. Every pool's pipework gives a different normal pressure — this way the limits follow your pool, not a fixed number.
+
+**After every backwash** call `learnCleanPressure()` once (e.g. from an HMI button). It clears the stored value and learns the new clean pressure during the next ~80 s of running — if the pump is off, it simply waits for the next run. It never copies a single reading, so a spike or a stopped pump cannot be learned by mistake.
+
+```cpp
+pump.enablePressure([]() { return adc.getPressure(); }, 2.5f);
+
+switch (pump.getFilterStatus()) {
+    case FILTER_FILLING:         /* show "backwash soon" */            break;
+    case FILTER_BACKWASH_NEEDED: /* show "backwash filter + LEARN" */  break;
+    default: break;
+}
+// after backwashing:
+pump.learnCleanPressure();
+```
+
+- It is a **status, not an alarm** — backwashing is maintenance, not an emergency. It keeps its value while the pump is stopped.
+- The limits are household-pool values. Change them with `setFilterThresholds(warn, backwash)` at runtime, or `build_flags = -DAPAPUMP_FILTER_WARN_DELTA=0.5f -DAPAPUMP_FILTER_BACKWASH_DELTA=1.0f`.
+- `setCleanPressure(bar)` sets the clean pressure by hand; `setCleanPressure(0)` forgets it (the current baseline is then taken as clean).
+- Keep `maxPressure` in `enablePressure()` **above** the backwash level and at or below the filter's rated maximum (often 2.5 bar for household sand filters — check the label).
+
+### Overcurrent protection
+
+`setCurrentCallback()` gives APAPUMP the pump's current in amps (APASENSE: `adc.getCurrent()`). A current well above normal means the motor is struggling: a blocked or jammed impeller, failing bearings, or a motor winding fault.
+
+**How it works**
+
+1. **Learns the pump's own normal current** — no pump rating to enter. A 0.5 kW and a 1.5 kW pump each learn their own value.
+2. One sample every 10 s once the pump has run 30 s (motor start-up current is ignored).
+3. After 5 samples (~80 s of running) the baseline is ready and the alarm arms.
+4. `PUMP_ALARM_OVERCURRENT` fires when a sample exceeds **1.5 × the baseline**. Checked every 10 s, so a fault is caught within 10 s.
+5. The baseline adapts slowly to normal changes (weight 5 % per sample) and is kept across pump cycles.
+
+**What it does not do**
+
+- It does not stop the pump by itself — see [Stopping the pump on an alarm](#stopping-the-pump-on-an-alarm-recommended).
+- It does not detect a dry run (a dry pump draws *less* current) — that is the pressure sensor's job.
+- It is not a replacement for the motor's own thermal protection or the circuit breaker. It warns early; the breaker protects the wiring.
+
+**Direct drive vs. external contactor** — check how your pump is wired:
+
+| Wiring | What passes the current sensor | Overcurrent protection |
+|--------|-------------------------------|------------------------|
+| Pump powered directly through the board's relay | the pump's current (typically 2–8 A) | **active** |
+| Board relay only switches an external contactor in the electrical box | only the contactor's coil (well under 0.5 A) | **silent** — no alarms, no false alarms |
+
+> **Safety:** switching the pump through an external contactor (rated for motor loads) is always recommended over connecting it directly to a controller relay. Small board relays are often not rated for a motor's start-up current.
+
+Readings below **0.5 A** (`APAPUMP_CURRENT_MIN_A`) are ignored: they are not a motor, just sensor noise or a contactor coil. So with a contactor the feature switches itself off safely — nothing to configure. **With a contactor, pressure monitoring (dry run, high pressure, filter status) is the pump's protection**; use a motor protection switch in the electrical box for the motor itself.
+
+**Good to know**
+
+- The baseline lives in RAM: after each boot it is re-learned during the first ~80 s of running, with no overcurrent alarm during that time.
+- Nothing is learned while an alarm is active, so an overload never raises its own threshold.
+- After replacing or servicing the pump, call `resetCurrentBaseline()` so the new motor's current is learned.
+- A very small pump (under ~0.5 A): lower the floor with `build_flags = -DAPAPUMP_CURRENT_MIN_A=0.3f`.
 
 ### Freeze protection
 
@@ -433,22 +527,26 @@ pump.begin(
 ### Bridge: APADOSE post-shock → APAPUMP
 
 ```cpp
-// After a shock dose, run the pump for 4 hours to circulate the chlorine.
-// Uses the externalRequestCb — no new API needed.
+// Keep the pump running during a shock and for 4 hours after it, to circulate the
+// chlorine (a schedule slot ending mid-shock would otherwise stop the pump and
+// APADOSE would abort the shock). Uses the externalRequestCb — no new API needed.
+// Elapsed-time check, so it stays correct when millis() wraps after ~49 days.
 
-static uint32_t postShockUntil = 0;
+const uint32_t POST_SHOCK_MS = 4UL * 3600UL * 1000UL;
+uint32_t postShockEndMs = 0;   // 0 = no post-shock window
 
-pump.begin(scheduleCb,
-    []() {
-        // Shock is running: extend the post-shock window
-        if (dose1.isShockActive()) {
-            postShockUntil = millis() + 4UL * 3600UL * 1000UL;
-            return true;
-        }
-        // Pump on until post-shock window expires
-        return (millis() < postShockUntil);
+bool postShockWantsPump() {
+    if (dose1.isShockActive()) {
+        postShockEndMs = millis() | 1;   // |1: never 0, the "no window" marker
+        return true;
     }
-);
+    if (postShockEndMs == 0) return false;
+    if (millis() - postShockEndMs < POST_SHOCK_MS) return true;
+    postShockEndMs = 0;
+    return false;
+}
+
+pump.begin(scheduleCb, postShockWantsPump);
 ```
 
 ### Bridge: pump manual mode → APALCDGUI status indicator
@@ -475,9 +573,9 @@ adc.begin();    // zero-cal requires pump off — call first
 pump.begin();
 pump.enablePressure(
     []() { return adc.getPressure(); },    // -1.0f until calibrated
-    4.0f                                   // absolute max pressure (bar)
+    2.5f                                   // alarm limit = filter's rated pressure (bar)
 );
-pump.setCurrentCallback([]() { return adc.getCurrent(); });
+pump.setCurrentCallback([]() { return adc.getCurrent(); });   // amps; silent below 0.5 A
 
 // Bridge: tell APASENSE when pump state changes so it can re-zero on pump stop
 pump.setPumpStateCallback([](bool on) { adc.onPumpState(on); });
@@ -491,7 +589,7 @@ pump.setPumpStateCallback([](bool on) { adc.onPumpState(on); });
 |--------|-------|-------------|
 | `examples/01_minimal/` | Basic | PCF or GPIO, manual override via Serial, all three constructor options |
 | `examples/02_scheduler/` | Intermediate | APALCDGUI timer schedule, UVC + AUX followers, alarm → active alert bridge |
-| `examples/03_solar_freeze/` | Advanced | Solar heater + solar valve, freeze protection, pressure safety, APADOSE post-shock bridge |
+| `examples/03_solar_freeze/` | Advanced | Solar heater + solar valve, freeze protection, pressure + current safety, filter status, pump stopped on alarm, APADOSE post-shock bridge |
 
 ---
 
@@ -501,11 +599,11 @@ Compiled with the `01_minimal` example. Zero errors, zero library warnings on al
 
 | Platform | Board | RAM used | RAM total | Flash used | Flash total |
 |----------|-------|----------|-----------|------------|-------------|
-| Arduino Mega 2560 | ATmega2560 | 564 B | 8 192 B (6.9%) | 11 860 B | 253 952 B (4.7%) |
-| Arduino Uno | ATmega328P | 564 B | 2 048 B (27.5%) | 11 094 B | 32 256 B (34.4%) |
-| ESP32 DevKit | ESP32 | 22 024 B | 327 680 B (6.7%) | 290 493 B | 1 310 720 B (22.2%) |
-| ESP8266 D1 Mini | ESP8266 | 28 852 B | 81 920 B (35.2%) | 274 147 B | 1 044 464 B (26.2%) |
-| STM32 Bluepill | STM32F103C8 | 2 628 B | 20 480 B (12.8%) | 25 984 B | 65 536 B (39.6%) |
+| Arduino Mega 2560 | ATmega2560 | 564 B | 8 192 B (6.9%) | 11 968 B | 253 952 B (4.7%) |
+| Arduino Uno | ATmega328P | 564 B | 2 048 B (27.5%) | 11 202 B | 32 256 B (34.7%) |
+| ESP32 DevKit | ESP32 | 22 024 B | 327 680 B (6.7%) | 290 709 B | 1 310 720 B (22.2%) |
+| ESP8266 D1 Mini | ESP8266 | 28 852 B | 81 920 B (35.2%) | 274 255 B | 1 044 464 B (26.3%) |
+| STM32 Bluepill | STM32F103C8 | 2 628 B | 20 480 B (12.8%) | 26 060 B | 65 536 B (39.8%) |
 
 > The Uno row uses 27.5% RAM — that is the library with all Phase 2 features **registered** in the example. A minimal sketch (no solar, no pressure, no freeze) sits below 20%. ESP32 and ESP8266 totals include the full Arduino framework regardless of use.
 
@@ -524,7 +622,7 @@ APAPUMP reserves **12 bytes** starting at `APAPUMP_EEPROM_ADDR` (default 520).
 | 523 | 2 | Daily target (minutes) | `setDailyTarget()` |
 | 525 | 2 | Yesterday's runtime (minutes) | Midnight rollover (once per day) |
 | 527 | 2 | Minimum run time (seconds) | `setMinRunTime()` |
-| 529 | 2 | Clean pressure × 100 (bar; 0 = not learned) | `learnCleanPressure()` / `setCleanPressure()` |
+| 529 | 2 | Clean pressure × 100 (bar; 0 = not learned) | automatic first learn, `learnCleanPressure()`, `setCleanPressure()` |
 | 531 | 1 | Checksum (byte sum of bytes 520–530) | — corruption guard |
 
 ### Write protection and EEPROM lifespan
@@ -540,7 +638,7 @@ APAPUMP reserves **12 bytes** starting at `APAPUMP_EEPROM_ADDR` (default 520).
 | Event | Max frequency | Cycles used at 100 k limit |
 |-------|--------------|---------------------------|
 | Midnight rollover | 1 per day | 100 k days ≈ 273 years |
-| `learnCleanPressure()` | Operator action | Negligible |
+| Clean pressure (first learn, `learnCleanPressure()`) | After install / after each backwash | Negligible |
 | `setMinRunTime()` from `setup()` | 0 physical writes if value unchanged | None |
 | First boot / corruption recovery | Once | 1 cycle |
 
@@ -548,10 +646,9 @@ APAPUMP reserves **12 bytes** starting at `APAPUMP_EEPROM_ADDR` (default 520).
 
 ### Override base address
 
-```cpp
-// Define before #include if the default conflicts with another library in your project:
-#define APAPUMP_EEPROM_ADDR  532
-#include <APAPUMP.h>
+```ini
+; platformio.ini — build_flags reach both your sketch and the library's own .cpp
+build_flags = -DAPAPUMP_EEPROM_ADDR=532
 ```
 
 ### APA EEPROM address map
@@ -564,13 +661,15 @@ All ranges across the APA library suite — free blocks shown explicitly:
 | 128–177 | 50 | used | APAPHX2_ADS1115 (sensor calibration) |
 | 178–188 | 11 | **free** | — |
 | 189–191 | 3 | used | APADOSE global (pool volume, dead-band) |
-| 192–279 | 88 | used | APADOSE per-pump config (22 bytes × up to 4 instances) |
-| 280–499 | 220 | **free** | — |
+| 192–291 | 100 | used | APADOSE per-pump config (25 bytes × up to 4 instances) |
+| 292–499 | 208 | **free** | — |
 | 500–501 | 2 | used | APALCDGUI brightness |
 | 502–508 | 7 | used | APALCDGUI timer slots (default 3 slots) |
 | 509–519 | 11 | **free** | — gap before APAPUMP ¹ |
 | **520–531** | **12** | **used** | **APAPUMP** |
-| 532– | — | **free** | — |
+| 532–581 | 50 | **free** | — APAPUMP expansion reserve |
+| 582–587 | 6 | used | APASENSE (pressure zero) |
+| 588– | — | **free** | — |
 
 > ¹ When `APA_LCD_MAX_TIMERS=6` the timer block extends to 514, leaving a 5-byte gap (515–519) before APAPUMP. This gap is intentional — do not place anything in 515–519 to keep the gap safe regardless of timer configuration.
 

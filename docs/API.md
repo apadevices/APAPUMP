@@ -1,4 +1,4 @@
-# APAPUMP API Reference — v1.0.3
+# APAPUMP API Reference — v1.1.0
 
 ## Quick-start examples
 
@@ -234,7 +234,7 @@ Returns `true` when freeze protection is active (temperature below threshold). T
 float getPressureBaseline() const;
 ```
 
-Returns the learned normal-running pressure baseline in bar. Returns `0.0` until at least 5 pump run samples have been collected. Use for HMI display to verify sensor calibration.
+Returns the learned normal-running pressure baseline in bar (solar valve closed). Returns `0.0` until 5 samples have been collected — about 80 s of running after each boot. Use for HMI display to verify sensor calibration.
 
 ---
 
@@ -258,12 +258,16 @@ void setPumpAlarmCallback(void (*cb)(PumpAlarm alarm));
 
 Fires when an alarm condition is detected. All alarms are latching — call `acknowledgeAlarm()` to clear. Fires again with `PUMP_ALARM_NONE` after acknowledgment.
 
+**The library never stops the pump on an alarm** — your sketch decides. Recommended: keep the pump in `FORCE_OFF` while `getAlarm() != PUMP_ALARM_NONE` (see README, "Stopping the pump on an alarm"). While an alarm is active the current and pressure baselines are not updated.
+
 | Alarm | Condition |
 |-------|-----------|
-| `PUMP_ALARM_OVERCURRENT` | Current > learned baseline × 1.5 |
+| `PUMP_ALARM_OVERCURRENT` | Current > learned baseline × 1.5 (direct-drive pumps; silent below 0.5 A) |
 | `PUMP_ALARM_LOW_PRESSURE` | Pressure too low — dry-run suspected |
-| `PUMP_ALARM_HIGH_PRESSURE` | Pressure too high — filter dirty or blockage |
+| `PUMP_ALARM_HIGH_PRESSURE` | Pressure above `maxPressure`, or a sudden rise (if `setPressurePeakAlarm()` is on) — closed valve or blockage |
 | `PUMP_ALARM_NO_FLOW` | Flow switch reports no flow after settle |
+
+A slowly clogging filter does not raise an alarm — see `getFilterStatus()`.
 
 ---
 
@@ -406,6 +410,17 @@ void setCurrentCallback(float (*cb)());
 
 Register a current reading callback (e.g. `[]() { return adc.getCurrent(); }`). Returns amperes; return `-1.0f` when sensor not ready. Enables `PUMP_ALARM_OVERCURRENT` detection.
 
+| Behaviour | Detail |
+|-----------|--------|
+| Baseline | Learns the pump's own normal current (EMA, weight 5 %), no rating to configure |
+| Sampling | Every 10 s (`APAPUMP_CURRENT_SAMPLE_MS`), starting 30 s after pump-on (`APAPUMP_CURRENT_SETTLE_SEC`) |
+| Arming | After 5 samples (~80 s of running); re-learned after every boot (RAM only) |
+| Alarm | Sample > baseline × 1.5, checked on each 10 s sample |
+| Floor | Readings below `APAPUMP_CURRENT_MIN_A` (0.5 A) are never learned and never alarm |
+| During an alarm | Baseline frozen — an overload never raises its own threshold |
+
+**External contactor:** when the board relay only switches a contactor in the electrical box, the sensor sees just the coil current (< 0.5 A), so overcurrent protection stays silent — no false alarms, nothing to configure. The pump is then protected by pressure monitoring. See README, "Overcurrent protection".
+
 ---
 
 ### `resetCurrentBaseline()`
@@ -414,7 +429,7 @@ Register a current reading callback (e.g. `[]() { return adc.getCurrent(); }`). 
 void resetCurrentBaseline();
 ```
 
-Clears the learned EMA baseline. Call after pump service or motor replacement so the new current draw is re-learned from scratch.
+Clears the learned current baseline. Call after pump service or motor replacement so the new current draw is re-learned from scratch (~80 s of running; no overcurrent alarm meanwhile).
 
 ---
 
@@ -428,7 +443,9 @@ void enablePressure(float (*pressureCb)(), float maxPressure);
 
 Register a pressure callback. `pressureCb` must return `-1.0f` when APASENSE is not yet calibrated — APAPUMP skips all pressure logic until a valid reading arrives.
 
-`maxPressure` is the absolute hard limit (bar). When running pressure exceeds this value, `PUMP_ALARM_HIGH_PRESSURE` fires immediately, even before the EMA baseline builds. Pass `0.0f` to disable the absolute check and rely only on the EMA-relative alarm.
+`maxPressure` is the absolute hard limit (bar). When running pressure exceeds this value, `PUMP_ALARM_HIGH_PRESSURE` fires immediately, even before the EMA baseline builds. Use the filter's rated maximum working pressure (household sand filters: often 2.5 bar — check the label), and keep it above the filter-status backwash level. Pass `0.0f` to disable the absolute check.
+
+Readings below `APAPUMP_PRESSURE_ABS_MIN` (0.1 bar) are never learned into the baseline, and nothing is learned while an alarm is active.
 
 Required init order: `adc.begin()` BEFORE `pump.begin()`.
 
@@ -460,7 +477,7 @@ Returns `true` once `pressureCb` has returned a value ≥ 0.0 (APASENSE calibrat
 float getPressureBaseline() const;
 ```
 
-Returns the learned normal-running pressure EMA (bar). Returns `0.0` until 5 pump run samples have been collected. Use for HMI display.
+Returns the learned normal-running pressure EMA (bar, solar valve closed). Returns `0.0` until 5 samples have been collected (~80 s of running after each boot). Use for HMI display.
 
 ---
 
@@ -470,21 +487,59 @@ Returns the learned normal-running pressure EMA (bar). Returns `0.0` until 5 pum
 void setPressurePeakAlarm(uint8_t peakPct = 20);
 ```
 
-Enable EMA-relative overpressure alarm. Fires `PUMP_ALARM_HIGH_PRESSURE` when running pressure exceeds the learned EMA baseline × (1 + peakPct/100). Example: `setPressurePeakAlarm(20)` fires when pressure is 20% above normal. `0` = disabled. Requires `enablePressure()`.
+Enable a **sudden-rise** overpressure alarm. Fires `PUMP_ALARM_HIGH_PRESSURE` when running pressure exceeds the learned EMA baseline × (1 + peakPct/100). Example: `setPressurePeakAlarm(20)` fires when pressure jumps 20 % above normal, e.g. a valve closed while running. `0` = disabled (default). Requires `enablePressure()`.
+
+The baseline follows slow changes within minutes, so this alarm does **not** detect a clogging filter — use `getFilterStatus()`. Turning a multiport valve while the pump runs can trip it.
 
 ---
 
-### Filter status (deferred)
+## Filter status
+
+Requires `enablePressure()`. Status only — no alarm. See README, "Filter status — when to backwash".
+
+### `getFilterStatus()`
 
 ```cpp
-void         setFilterThresholds(float warningDelta, float backwashDelta);
-void         learnCleanPressure();
-void         setCleanPressure(float bar);
-float        getCleanPressure() const;
 FilterStatus getFilterStatus() const;
 ```
 
-Filter status reporting uses the manually-learned clean-filter pressure as a baseline. `getFilterStatus()` currently always returns `FILTER_UNKNOWN` — implementation deferred until pressure baseline is verified in field. `learnCleanPressure()` captures the current pressure as the clean-filter baseline and saves it to EEPROM.
+Compares the running pressure baseline (solar valve closed) with the clean-filter pressure:
+
+| Returns | When |
+|---------|------|
+| `FILTER_CLEAN` | rise < warning delta (default 0.4 bar) |
+| `FILTER_FILLING` | rise ≥ warning delta — backwash soon |
+| `FILTER_BACKWASH_NEEDED` | rise ≥ backwash delta (default 0.8 bar) |
+| `FILTER_UNKNOWN` | no clean pressure learned yet, or no baseline yet (~80 s of running after each boot) |
+
+Keeps its value while the pump is stopped.
+
+### `learnCleanPressure()`
+
+```cpp
+void learnCleanPressure();
+```
+
+Call after every backwash or filter clean. Clears the stored clean pressure and restarts the valve-closed baseline; the next ~80 s of running learns the new clean pressure and saves it to EEPROM. With the pump off, it waits for the next run. Never copies a single reading. No-op without `enablePressure()`.
+
+On a first install the clean pressure is learned the same way **automatically** — no call needed.
+
+### `setCleanPressure()` / `getCleanPressure()`
+
+```cpp
+void  setCleanPressure(float bar);
+float getCleanPressure() const;
+```
+
+Set the clean pressure by hand (bar, saved to EEPROM). `0` forgets it — the current baseline is then taken as the clean pressure on the next pressure sample. `getCleanPressure()` returns `0.0` while not learned.
+
+### `setFilterThresholds()`
+
+```cpp
+void setFilterThresholds(float warningDelta, float backwashDelta);
+```
+
+Rise above the clean pressure (bar) for `FILTER_FILLING` / `FILTER_BACKWASH_NEEDED`. Defaults `APAPUMP_FILTER_WARN_DELTA` 0.4 and `APAPUMP_FILTER_BACKWASH_DELTA` 0.8 (household pools). Not saved to EEPROM — call in `setup()`, or override the defaults with `build_flags`.
 
 ---
 
@@ -619,7 +674,7 @@ enum FilterStatus : uint8_t {
 };
 ```
 
-`getFilterStatus()` currently always returns `FILTER_UNKNOWN`.
+See `getFilterStatus()`.
 
 ### `PumpAlarm`
 
@@ -641,7 +696,7 @@ All non-NONE alarms are latching — call `acknowledgeAlarm()` to clear.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `APAPUMP_VERSION` | `"1.0.3"` | Library version string |
+| `APAPUMP_VERSION` | `"1.1.0"` | Library version string |
 | `APAPUMP_MIN_OFF_SEC` | 60 | Minimum pause after pump stops (non-manual) |
 | `APAPUMP_MIN_RUN_SEC` | 300 | Default minimum run time before stopping |
 | `APAPUMP_VALVE_PULSE_MS` | 500 | Default pulse width for `VALVE_PULSE` mode |
@@ -651,16 +706,23 @@ All non-NONE alarms are latching — call `acknowledgeAlarm()` to clear.
 | `APAPUMP_FREEZE_ON_SEC` | 300 | Freeze cycle: pump run duration (5 min) |
 | `APAPUMP_FREEZE_OFF_SEC` | 600 | Freeze cycle: rest between runs (10 min) |
 | `APAPUMP_PRESSURE_DRYRUN_PCT` | 40 | Pressure must be ≥ this % of EMA baseline to confirm flow |
-| `APAPUMP_PRESSURE_ABS_MIN` | 0.1 | Absolute minimum pressure (bar) used before EMA builds |
+| `APAPUMP_PRESSURE_ABS_MIN` | 0.1 | Minimum pressure (bar) of a running pump: dry-run limit before the EMA builds; lower readings are never learned |
 
 ---
 
 ## Configurable limits
 
-Define before `#include <APAPUMP.h>`:
+Set in `build_flags` (PlatformIO) so the library and your sketch see the same value — a `#define` in the sketch does not reach the library's own `.cpp`:
 
-```cpp
-#define APAPUMP_EEPROM_ADDR  520   // EEPROM base address (default 520, uses 12 bytes)
+| Define | Default | Meaning |
+|--------|---------|---------|
+| `APAPUMP_EEPROM_ADDR` | 520 | EEPROM base address (uses 12 bytes) |
+| `APAPUMP_CURRENT_MIN_A` | 0.5 | Current (A) below which readings are ignored — no motor on the sensor |
+| `APAPUMP_FILTER_WARN_DELTA` | 0.4 | Filter status: `FILTER_FILLING` at clean + this (bar) |
+| `APAPUMP_FILTER_BACKWASH_DELTA` | 0.8 | Filter status: `FILTER_BACKWASH_NEEDED` at clean + this (bar) |
+
+```ini
+build_flags = -DAPAPUMP_CURRENT_MIN_A=0.3f -DAPAPUMP_FILTER_BACKWASH_DELTA=1.0f
 ```
 
 ---
@@ -678,7 +740,7 @@ Base address: `APAPUMP_EEPROM_ADDR` (default 520). Total: **12 bytes** (520–53
 | 3 | 523 | 2 | Daily target (minutes) | `setDailyTarget()` |
 | 5 | 525 | 2 | Yesterday's runtime (minutes) | Midnight rollover |
 | 7 | 527 | 2 | Minimum run time (seconds) | `setMinRunTime()` |
-| 9 | 529 | 2 | Clean pressure × 100 (bar) | `learnCleanPressure()` / `setCleanPressure()` |
+| 9 | 529 | 2 | Clean pressure × 100 (bar; 0 = not learned) | Automatic first learn, `learnCleanPressure()`, `setCleanPressure()` |
 | 11 | 531 | 1 | Checksum (byte sum of offsets 0–10) | Corruption guard |
 
 ### Write protection and EEPROM lifespan
@@ -698,7 +760,7 @@ Result: calling `setMinRunTime(300)` from `setup()` every boot with 300 already 
 | Trigger | Max rate | Cycles at 100 k limit |
 |---------|---------|----------------------|
 | Midnight rollover | 1 per day | ~273 years |
-| `learnCleanPressure()` | Manual, rare | Negligible |
+| Clean pressure (first learn, `learnCleanPressure()`) | After install / each backwash | Negligible |
 | `setMinRunTime()` with same value | 0 writes | ∞ |
 | First boot / corruption recovery | Once total | 1 cycle |
 
@@ -720,13 +782,15 @@ Result: calling `setMinRunTime(300)` from `setup()` every boot with 300 already 
 | 128–177 | 50 | used | APAPHX2_ADS1115 |
 | 178–188 | 11 | **free** | — |
 | 189–191 | 3 | used | APADOSE global (pool volume, dead-band) |
-| 192–279 | 88 | used | APADOSE per-pump (22 bytes × up to 4 instances) |
-| 280–499 | 220 | **free** | — |
+| 192–291 | 100 | used | APADOSE per-pump (25 bytes × up to 4 instances) |
+| 292–499 | 208 | **free** | — |
 | 500–501 | 2 | used | APALCDGUI brightness |
 | 502–508 | 7 | used | APALCDGUI timers (default 3 slots; extends to 514 with `MAX_TIMERS=6`) |
 | 509–519 | 11 | **free** | — intentional gap before APAPUMP ¹ |
 | **520–531** | **12** | **used** | **APAPUMP** |
-| 532– | — | **free** | — |
+| 532–581 | 50 | **free** | — APAPUMP expansion reserve |
+| 582–587 | 6 | used | APASENSE (pressure zero) |
+| 588– | — | **free** | — |
 
 > ¹ With `APA_LCD_MAX_TIMERS=6` the gap shrinks to 5 bytes (515–519). Do not place anything in 515–519 so the gap remains safe regardless of timer configuration.
 

@@ -3,8 +3,9 @@
 // Full APA pool automation system:
 //   • Solar heater with valve (absorber → pool temperature control)
 //   • Freeze protection with dry-run interlock
-//   • Pressure monitoring: dry-run + overpressure alarms
-//   • Current monitoring: overcurrent alarm
+//   • Pressure monitoring: dry-run + overpressure alarms, filter status (backwash reminder)
+//   • Current monitoring: overcurrent alarm (direct-drive pumps only — see README)
+//   • Pump stopped on any alarm until the operator acknowledges it
 //   • Catch-up window: make up missed daily target between 08:00 and 20:00
 //   • APADOSE post-shock bridge: keep pump running 4 h after a shock dose
 //   • Manual override with auto-return at midnight
@@ -28,18 +29,23 @@ float getPressure()   { return -1.0f; }   // pipe pressure (bar)   — -1 = not 
 float getCurrent()    { return -1.0f; }   // pump current (A)      — -1 = not ready
 
 // ---- APADOSE bridge ---------------------------------------------------------
-// Post-shock: keep pump running for 4 hours after a shock dose to circulate chlorine.
-// Replace dose1.isShockActive() with the real APADOSE call when wired in.
+// Post-shock: keep the pump running during a shock and for 4 hours after it, to
+// circulate the chlorine. Replace the commented line with the real APADOSE call.
+// Elapsed-time check (millis() - start), so it stays correct when millis() wraps.
 
-static uint32_t postShockUntil = 0;
+const uint32_t POST_SHOCK_MS = 4UL * 3600UL * 1000UL;
+uint32_t postShockEndMs = 0;   // 0 = no post-shock window
 
 bool externalPumpRequest() {
-    // Extend window while shock is running
-    // if (dose1.isShockActive()) {
-    //     postShockUntil = millis() + 4UL * 3600UL * 1000UL;
-    //     return true;
-    // }
-    return (millis() < postShockUntil);
+    bool shockActive = false;  // = dose1.isShockActive();
+    if (shockActive) {
+        postShockEndMs = millis() | 1;   // |1: never 0, the "no window" marker
+        return true;
+    }
+    if (postShockEndMs == 0) return false;
+    if (millis() - postShockEndMs < POST_SHOCK_MS) return true;
+    postShockEndMs = 0;
+    return false;
 }
 
 // ---- Objects ----------------------------------------------------------------
@@ -62,12 +68,12 @@ void onAlarm(PumpAlarm alarm) {
     switch (alarm) {
         case PUMP_ALARM_OVERCURRENT:   Serial.println(F("Overcurrent — check motor")); break;
         case PUMP_ALARM_LOW_PRESSURE:  Serial.println(F("Dry run — check water level")); break;
-        case PUMP_ALARM_HIGH_PRESSURE: Serial.println(F("High pressure — check filter")); break;
+        case PUMP_ALARM_HIGH_PRESSURE: Serial.println(F("High pressure — check valves/filter")); break;
         case PUMP_ALARM_NO_FLOW:       Serial.println(F("No flow — check valve/pipe")); break;
         default: break;
     }
-    // Pump keeps running — call pump.acknowledgeAlarm() after investigation.
-    // In a real system: route to gui.postActiveAlert(...) and let the operator decide.
+    // The library does NOT stop the pump — loop() keeps it off until the operator
+    // has checked it and calls pump.acknowledgeAlarm() (here: send 'a' on Serial).
 }
 
 // ---- Status callback --------------------------------------------------------
@@ -112,13 +118,19 @@ void setup() {
     // pump.setSolarDayNight([]() { return rtc.getEpoch(); }, 7, 20);
 
     // ---- Current monitoring -------------------------------------------------
+    // Learns the pump's own normal current; no rating to enter. Below 0.5 A it stays
+    // silent — e.g. when the board only switches an external contactor's coil.
     pump.setCurrentCallback(getCurrent);   // -1.0f until sensor ready — silently inactive
 
     // ---- Pressure monitoring ------------------------------------------------
     // enablePressure(callback, absoluteMaxBar)
     // pressureCb returns -1.0f until APASENSE is calibrated — all pressure checks skip.
-    pump.enablePressure(getPressure, 4.0f);       // absolute max 4 bar
-    pump.setPressurePeakAlarm(20);                 // also alarm at +20% above EMA baseline
+    pump.enablePressure(getPressure, 2.5f);       // max = your filter's rated pressure (label)
+    // pump.setPressurePeakAlarm(20);             // optional: SUDDEN rise > 20 % (closed valve).
+    //                                            // Turning a multiport valve while running trips it.
+
+    // Filter status (no alarm): the clean pressure is learned automatically on the
+    // first run; after every backwash call pump.learnCleanPressure() (here: send 'l').
 
     // Bridge: tell APASENSE when pump stops so it can re-zero the pressure sensor
     pump.setPumpStateCallback([](bool on) {
@@ -153,6 +165,17 @@ void setup() {
 void loop() {
     pump.update();
 
+    // Stop the pump while an alarm is active. Re-asserted every loop: FORCE_OFF alone
+    // would return to AUTO after the manual timeout and restart e.g. a dry pump.
+    if (pump.getAlarm() != PUMP_ALARM_NONE && pump.getManualMode() != FORCE_OFF)
+        pump.setManualMode(FORCE_OFF);
+
+    if (Serial.available()) {
+        char c = Serial.read();
+        if (c == 'a') { pump.acknowledgeAlarm(); pump.setManualMode(AUTO); }  // after checking
+        if (c == 'l') pump.learnCleanPressure();                            // after a backwash
+    }
+
     // Display periodic status on Serial (every 10 s)
     static uint32_t lastPrint = 0;
     if (millis() - lastPrint >= 10000UL) {
@@ -179,7 +202,13 @@ void loop() {
             Serial.print(pump.getPressure(), 2);
             Serial.print(F("bar (base="));
             Serial.print(pump.getPressureBaseline(), 2);
-            Serial.print(F(")"));
+            Serial.print(F(") filter: "));
+            switch (pump.getFilterStatus()) {
+                case FILTER_CLEAN:           Serial.print(F("clean"));         break;
+                case FILTER_FILLING:         Serial.print(F("filling"));       break;
+                case FILTER_BACKWASH_NEEDED: Serial.print(F("BACKWASH NEEDED")); break;
+                default:                     Serial.print(F("learning"));      break;
+            }
         }
         Serial.println();
     }
