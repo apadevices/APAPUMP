@@ -27,7 +27,7 @@
 #include <Wire.h>
 
 // ---- Version ----------------------------------------------------------------
-#define APAPUMP_VERSION "1.1.0"
+#define APAPUMP_VERSION "1.1.1"
 
 // ---- EEPROM base address (12 bytes: 520–531) --------------------------------
 // APA library address map — do not overlap these ranges:

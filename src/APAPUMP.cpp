@@ -170,17 +170,6 @@ void ApaPump::update() {
         if (p >= 0.0f) _lastPressure = p;
     }
 
-    // ---- EMA tick (10 s after inrush settle, pump running) -----------------
-    // Never while an alarm is active: the pump keeps running on an alarm unless the
-    // sketch stops it, and a dry run or an overcurrent must not become the new "normal".
-    if (_pumpState == RUNNING && !_flags.alarmActive &&
-        (now - _pumpStartMs) >= (uint32_t)APAPUMP_CURRENT_SETTLE_SEC * 1000UL &&
-        (now - _lastEmaMs)   >= APAPUMP_CURRENT_SAMPLE_MS) {
-        _lastEmaMs = now;
-        _updateCurrentEma();
-        _updatePressureEma();
-    }
-
     // ---- Safety alarm checks (after inrush settle, pump running) -----------
     if (_pumpState == RUNNING && !_flags.alarmActive &&
         (now - _pumpStartMs) >= (uint32_t)APAPUMP_CURRENT_SETTLE_SEC * 1000UL) {
@@ -229,6 +218,19 @@ void ApaPump::update() {
             _activeAlarm = PUMP_ALARM_NO_FLOW;
             if (_alarmCb) _alarmCb(PUMP_ALARM_NO_FLOW);
         }
+    }
+
+    // ---- EMA tick (10 s after inrush settle, pump running) -----------------
+    // AFTER the safety checks and never while an alarm is active: the pump keeps
+    // running on an alarm unless the sketch stops it, and a dry run, an overpressure
+    // or an overcurrent must not become the new "normal" -- not even the one sample
+    // that raised the alarm (before 1.1.1 that sample was learned first).
+    if (_pumpState == RUNNING && !_flags.alarmActive &&
+        (now - _pumpStartMs) >= (uint32_t)APAPUMP_CURRENT_SETTLE_SEC * 1000UL &&
+        (now - _lastEmaMs)   >= APAPUMP_CURRENT_SAMPLE_MS) {
+        _lastEmaMs = now;
+        _updateCurrentEma();
+        if (!_flags.alarmActive) _updatePressureEma();   // an overcurrent just raised -> skip
     }
 
     // ---- Solar safety override (Priority 0) --------------------------------
@@ -584,6 +586,15 @@ void ApaPump::_updateCurrentEma() {
     // sensor: noise would become the baseline and its spikes would read as overcurrent.
     if (measured < APAPUMP_CURRENT_MIN_A) return;
 
+    // Compare BEFORE learning: the overload sample itself must not raise the baseline.
+    if (_flags.baselineReady && _currentEma > 0.0f &&
+        measured > _currentEma * CURRENT_ALARM_MULTIPLIER && !_flags.alarmActive) {
+        _flags.alarmActive = 1;
+        _activeAlarm       = PUMP_ALARM_OVERCURRENT;
+        if (_alarmCb) _alarmCb(PUMP_ALARM_OVERCURRENT);
+        return;
+    }
+
     // Cold start: plain average of the first samples (an EMA seeded with the first
     // sample would keep ~81 % of that one reading), then the slow EMA.
     if (_currentSampleCount < CURRENT_COLD_START_SAMPLES) {
@@ -592,14 +603,6 @@ void ApaPump::_updateCurrentEma() {
         if (_currentSampleCount >= CURRENT_COLD_START_SAMPLES) _flags.baselineReady = 1;
     } else {
         _currentEma += CURRENT_EMA_ALPHA * (measured - _currentEma);
-    }
-
-    if (_flags.baselineReady && _currentEma > 0.0f) {
-        if (measured > _currentEma * CURRENT_ALARM_MULTIPLIER && !_flags.alarmActive) {
-            _flags.alarmActive = 1;
-            _activeAlarm       = PUMP_ALARM_OVERCURRENT;
-            if (_alarmCb) _alarmCb(PUMP_ALARM_OVERCURRENT);
-        }
     }
 }
 

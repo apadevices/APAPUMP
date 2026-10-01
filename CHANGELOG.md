@@ -1,5 +1,11 @@
 # Changelog — APAPUMP
 
+## [1.1.1] — 2026-10-01
+
+### Fixed
+
+- **The sample that raised an alarm was still learned.** 1.1.0 stopped learning while an alarm is active, but in `update()` the 10 s learning tick ran *before* the safety checks, so the one pressure sample that triggered the alarm was added to the baseline first; `_updateCurrentEma()` likewise added the overcurrent sample before comparing it. During the 5-sample start-up average one such sample weighs 20–100 % — found on the APA-CONTROLLER bench, where a 3.1 bar overpressure sample raised the baseline from 0.20 to 0.93 bar (and as the 5th sample it would have become the clean-filter pressure). Now the safety checks run first, the learning tick is skipped once an alarm is raised, and the current is compared before it is learned.
+
 ## [1.1.0] — 2026-09-30
 
 ### Added

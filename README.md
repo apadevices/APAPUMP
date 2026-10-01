@@ -5,7 +5,7 @@
 </p>
 
 **Autonomous filtration pump controller for APA Devices pool automation**
-· ![v1.1.0](https://img.shields.io/badge/version-1.1.0-blue)
+· ![v1.1.1](https://img.shields.io/badge/version-1.1.1-blue)
 · ![Platforms](https://img.shields.io/badge/platforms-AVR%20ESP8266%20ESP32%20STM32-brightgreen)
 
 ---
@@ -599,11 +599,11 @@ Compiled with the `01_minimal` example. Zero errors, zero library warnings on al
 
 | Platform | Board | RAM used | RAM total | Flash used | Flash total |
 |----------|-------|----------|-----------|------------|-------------|
-| Arduino Mega 2560 | ATmega2560 | 564 B | 8 192 B (6.9%) | 11 968 B | 253 952 B (4.7%) |
-| Arduino Uno | ATmega328P | 564 B | 2 048 B (27.5%) | 11 202 B | 32 256 B (34.7%) |
-| ESP32 DevKit | ESP32 | 22 024 B | 327 680 B (6.7%) | 290 709 B | 1 310 720 B (22.2%) |
-| ESP8266 D1 Mini | ESP8266 | 28 852 B | 81 920 B (35.2%) | 274 255 B | 1 044 464 B (26.3%) |
-| STM32 Bluepill | STM32F103C8 | 2 628 B | 20 480 B (12.8%) | 26 060 B | 65 536 B (39.8%) |
+| Arduino Mega 2560 | ATmega2560 | 564 B | 8 192 B (6.9%) | 11 952 B | 253 952 B (4.7%) |
+| Arduino Uno | ATmega328P | 564 B | 2 048 B (27.5%) | 11 186 B | 32 256 B (34.7%) |
+| ESP32 DevKit | ESP32 | 22 024 B | 327 680 B (6.7%) | 290 713 B | 1 310 720 B (22.2%) |
+| ESP8266 D1 Mini | ESP8266 | 28 852 B | 81 920 B (35.2%) | 274 271 B | 1 044 464 B (26.3%) |
+| STM32 Bluepill | STM32F103C8 | 2 628 B | 20 480 B (12.8%) | 26 068 B | 65 536 B (39.8%) |
 
 > The Uno row uses 27.5% RAM — that is the library with all Phase 2 features **registered** in the example. A minimal sketch (no solar, no pressure, no freeze) sits below 20%. ESP32 and ESP8266 totals include the full Arduino framework regardless of use.
 
