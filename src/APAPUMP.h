@@ -27,7 +27,7 @@
 #include <Wire.h>
 
 // ---- Version ----------------------------------------------------------------
-#define APAPUMP_VERSION "1.1.1"
+#define APAPUMP_VERSION "1.2.0"
 
 // ---- EEPROM base address (12 bytes: 520–531) --------------------------------
 // APA library address map — do not overlap these ranges:
@@ -292,6 +292,14 @@ public:
      *  Trigger pressure zero-cal bridge: pump.setPumpStateCallback(
      *      [](bool on){ if (!on) adc.onPumpState(false); }); */
     void enablePressure(float (*pressureCb)(), float maxPressure);
+
+    /** Turn pressure monitoring off/on at runtime, after enablePressure() — e.g. an HMI
+     *  setting for installations without a pressure sensor. OFF: no dry-run, high-pressure
+     *  or filter-status checks from the next update() on; the last reading and both learned
+     *  baselines are cleared (they are re-learned after ON). The stored clean-filter pressure
+     *  is kept. An alarm already raised stays until acknowledgeAlarm(). Default: ON. */
+    void  setPressureEnabled(bool on);
+    bool  isPressureEnabled() const;   // false before enablePressure() or after setPressureEnabled(false)
 
     /** Returns the last calibrated pressure reading. 0.0 before first valid read. */
     float getPressure() const;

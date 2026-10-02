@@ -812,6 +812,20 @@ void ApaPump::enablePressure(float (*pressureCb)(), float maxPressure) {
     _flags.pressureEnabled = 1;
 }
 
+// Clearing _lastPressure matters: update() only overwrites it with valid readings, so a
+// stale value would otherwise stay in the dry-run / overpressure checks after OFF -> ON.
+void ApaPump::setPressureEnabled(bool on) {
+    if (on && !_pressureCb) return;   // enablePressure() was never called
+    _flags.pressureEnabled  = on ? 1 : 0;
+    if (on) return;
+    _lastPressure           = -1.0f;
+    _pressureEmaNormal      = 0.0f;
+    _pressureEmaSolar       = 0.0f;
+    _pressureEmaCountNormal = 0;
+    _pressureEmaCountSolar  = 0;
+}
+bool  ApaPump::isPressureEnabled()    const { return _flags.pressureEnabled; }
+
 float ApaPump::getPressure()          const { return (_lastPressure >= 0.0f) ? _lastPressure : 0.0f; }
 bool  ApaPump::isPressureCalibrated() const { return _flags.pressureEnabled && _lastPressure >= 0.0f; }
 

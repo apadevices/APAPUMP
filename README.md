@@ -5,7 +5,7 @@
 </p>
 
 **Autonomous filtration pump controller for APA Devices pool automation**
-· ![v1.1.1](https://img.shields.io/badge/version-1.1.1-blue)
+· ![v1.2.0](https://img.shields.io/badge/version-1.2.0-blue)
 · ![Platforms](https://img.shields.io/badge/platforms-AVR%20ESP8266%20ESP32%20STM32-brightgreen)
 
 ---
@@ -39,6 +39,7 @@
 - **Overcurrent** — learns the pump's own normal current, alarms at × 1.5; no pump rating to enter; silent with an external contactor ([details](#overcurrent-protection))
 - **Dry-run** — pressure below EMA baseline × 40% (or absolute minimum before EMA builds)
 - **Overpressure** — absolute hard limit at `maxPressure` (the filter's rated pressure); optional sudden-rise alarm
+- **Pressure monitoring can be switched off at runtime** — `setPressureEnabled(false)` for installations without a pressure sensor ([details](#pressure-sensor-optional))
 - **Learned baselines never learn a fault** — no learning while an alarm is active, nor from a dry pipe or a motor-less current sensor
 - **Freeze protection** — pool temp below 4.5 °C → cyclic run (5 min ON / 10 min rest); suppressed if dry-run detected
 - **No-flow stub** — flow switch confirmed after settle; hardware-ready for future sensor
@@ -419,6 +420,17 @@ When `enablePressure()` is registered, APAPUMP builds a dual pressure baseline (
 
 Before the baseline is ready, an absolute minimum of 0.1 bar (`APAPUMP_PRESSURE_ABS_MIN`) is used. Readings below 0.1 bar are never learned — a pump running dry cannot teach itself that "no pressure" is normal.
 
+### Pressure sensor optional
+
+Not every installation has a pressure sensor (small garden pools often don't). Register the sensor once with `enablePressure()`, then switch monitoring on or off at any time — e.g. from an installer menu, with the choice stored by your sketch:
+
+```cpp
+pump.enablePressure([]() { return adc.getPressure(); }, 2.5f);
+pump.setPressureEnabled(settings.pressureOn);   // OFF: no pressure checks at all
+```
+
+With pressure **off** there is **no dry-run, no high-pressure alarm and no filter status** — the pump then has no protection against running dry. Without a sensor, leaving it on is harmless (a sensor that never delivers a valid reading keeps every pressure check inactive), but an explicit OFF also ignores a disconnected input that floats to a plausible value. Switching off clears the last reading and the learned baselines; switching on re-learns them (~80 s of running). The stored clean-filter pressure is kept.
+
 ### Filter status — when to backwash
 
 A sand or cartridge filter clogs slowly, and the pressure in front of it rises. `getFilterStatus()` compares the running pressure with the pressure measured when the filter was clean:
@@ -601,7 +613,7 @@ Compiled with the `01_minimal` example. Zero errors, zero library warnings on al
 |----------|-------|----------|-----------|------------|-------------|
 | Arduino Mega 2560 | ATmega2560 | 564 B | 8 192 B (6.9%) | 11 952 B | 253 952 B (4.7%) |
 | Arduino Uno | ATmega328P | 564 B | 2 048 B (27.5%) | 11 186 B | 32 256 B (34.7%) |
-| ESP32 DevKit | ESP32 | 22 024 B | 327 680 B (6.7%) | 290 713 B | 1 310 720 B (22.2%) |
+| ESP32 DevKit | ESP32 | 22 024 B | 327 680 B (6.7%) | 290 709 B | 1 310 720 B (22.2%) |
 | ESP8266 D1 Mini | ESP8266 | 28 852 B | 81 920 B (35.2%) | 274 271 B | 1 044 464 B (26.3%) |
 | STM32 Bluepill | STM32F103C8 | 2 628 B | 20 480 B (12.8%) | 26 068 B | 65 536 B (39.8%) |
 

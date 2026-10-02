@@ -1,4 +1,4 @@
-# APAPUMP API Reference — v1.1.1
+# APAPUMP API Reference — v1.2.0
 
 ## Quick-start examples
 
@@ -451,6 +451,26 @@ Required init order: `adc.begin()` BEFORE `pump.begin()`.
 
 ---
 
+### `setPressureEnabled()` / `isPressureEnabled()`
+
+```cpp
+void setPressureEnabled(bool on);
+bool isPressureEnabled() const;
+```
+
+Switch pressure monitoring off or on at runtime, after `enablePressure()` — for installations without a pressure sensor, typically from an installer menu (persist the choice in your sketch).
+
+| | OFF | ON |
+|---|---|---|
+| Dry-run / high-pressure alarms | not checked | checked |
+| Filter status | `FILTER_UNKNOWN` | normal |
+| Last reading, learned baselines | cleared | re-learned (~80 s of running) |
+| Stored clean-filter pressure | kept | used again |
+
+An alarm already raised stays until `acknowledgeAlarm()`. `setPressureEnabled(true)` does nothing if `enablePressure()` was never called. Default after `enablePressure()`: ON.
+
+---
+
 ### `getPressure()`
 
 ```cpp
@@ -696,7 +716,7 @@ All non-NONE alarms are latching — call `acknowledgeAlarm()` to clear.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `APAPUMP_VERSION` | `"1.1.1"` | Library version string |
+| `APAPUMP_VERSION` | `"1.2.0"` | Library version string |
 | `APAPUMP_MIN_OFF_SEC` | 60 | Minimum pause after pump stops (non-manual) |
 | `APAPUMP_MIN_RUN_SEC` | 300 | Default minimum run time before stopping |
 | `APAPUMP_VALVE_PULSE_MS` | 500 | Default pulse width for `VALVE_PULSE` mode |

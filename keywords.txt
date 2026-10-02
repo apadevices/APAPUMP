@@ -42,6 +42,8 @@ resetCurrentBaseline	KEYWORD2
 enablePressure	KEYWORD2
 getPressure	KEYWORD2
 isPressureCalibrated	KEYWORD2
+setPressureEnabled	KEYWORD2
+isPressureEnabled	KEYWORD2
 setFilterThresholds	KEYWORD2
 learnCleanPressure	KEYWORD2
 setCleanPressure	KEYWORD2

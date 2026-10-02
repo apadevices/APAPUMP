@@ -1,5 +1,12 @@
 # Changelog — APAPUMP
 
+## [1.2.0] — 2026-10-01
+
+### Added
+
+- `setPressureEnabled(bool)` / `isPressureEnabled()` — switch pressure monitoring off and on at runtime (after `enablePressure()`), e.g. from an installer menu for pools without a pressure sensor. OFF stops the dry-run, high-pressure and filter-status checks and clears the last reading and both learned baselines (a stale reading would otherwise stay in the checks); the stored clean-filter pressure is kept. Before 1.2.0 pressure monitoring could only be enabled, never disabled. 0 bytes RAM.
+- README section "Pressure sensor optional".
+
 ## [1.1.1] — 2026-10-01
 
 ### Fixed
