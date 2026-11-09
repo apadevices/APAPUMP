@@ -1,5 +1,73 @@
 # Changelog — APAPUMP
 
+## [1.3.0] — 2026-11-09
+
+### Behaviour changes (read before updating)
+
+1. **Solar overheat protection no longer overrides `FORCE_OFF`.** It runs only in `AUTO` and never while a
+   pump alarm is latched (manual OFF usually means someone works at the pump; after a dry run there is no
+   water to circulate). `isSolarSafetyActive()` still reports a hot collector in every mode.
+2. **Solar no longer replaces the schedule.** Default `SOLAR_WITH_SCHEDULE`: the schedule keeps driving the
+   pump, solar heating and cooling are extra runs. `setSolarDrive(SOLAR_WITH_CATCHUP)` restores 1.2.0.
+3. **The solar valve follows the solar demand during a run** (before: set only at pump start, so it stayed
+   open while the collector cooled, or closed while it warmed). After every valve change the pressure
+   checks and baseline learning pause for 30 s (`APAPUMP_VALVE_SETTLE_SEC`).
+4. **Invalid temperatures stop solar logic** instead of being used: outside −20…100 °C, exactly 85.0
+   (DS18B20 power-on) or exactly −1.0 (old "not ready"). A pool temperature callback is now required for
+   solar (before, a missing one counted as 0 °C → heating all day).
+5. **Saved settings:** solar mode, Max pool, AUX mode, heater target and `setPressureEnabled()` are saved.
+   `enableSolar()`'s `useValve` / `maxPoolTemp` and `enableAux()` are first-boot defaults only.
+6. **EEPROM layout version 2 (15 bytes, 520–534).** Upgrading resets the block once: the clean-filter
+   pressure, daily target and counters are learned / set again.
+7. In heater modes the pump stops without the AUX stop lead when AUX was already off. `AUX_FOLLOWER`
+   (the default of `enableAux()`) behaves exactly as before.
+8. While a pump alarm is latched, solar asks for no extra runs (heating, cooling, overheat) — the schedule
+   still runs as before; your sketch decides whether to stop the pump on an alarm.
+
+### Added
+
+- Heater (heat pump) on the AUX relay: `AuxMode` (`AUX_DISABLED`, `AUX_FOLLOWER`, `HEATER_SIMPLE`,
+  `HEATER_FULL`), `setAuxMode()`, `setHeaterTarget()` (15–40 °C, default 28), `setHeaterPermitCallback()`
+  (e.g. cheap tariff), `isHeaterOn()`. Solar first; off on a pump alarm; no extra pump runs; minimum
+  ON/OFF 10 min (`APAPUMP_HEATER_MIN_ON_SEC` / `_MIN_OFF_SEC`); `HEATER_FULL` hysteresis `APAPUMP_HEATER_HYST_C`.
+- Solar: `SolarMode` (`SOLAR_OFF`, `SOLAR_PUMP`, `SOLAR_VALVE`), `setSolarMode()`, `setSolarMaxPool()`
+  (0 = no limit), `SolarDrive` + `setSolarDrive()`, `isSolarRunning()`, `isSolarValveOpen()`,
+  `isSolarSensorOk()` (status "Solar sensor fault" / "Solar sensor OK").
+- `setPoolTempCallback()` — one pool temperature for solar and `HEATER_FULL`.
+- `hasSavedSettings()` — apply your own first-boot defaults without overwriting saved choices.
+- Constants (`#ifndef`): `APAPUMP_TEMP_MIN_C`, `APAPUMP_TEMP_MAX_C`, `APAPUMP_FREEZE_HYST_C`,
+  `APAPUMP_VALVE_SETTLE_SEC`, `APAPUMP_HEATER_*`.
+- Example `05_solar_heater`. README: solar rewrite, "Day/night gate — why it exists", heater section with
+  the relay rule, "Saved settings".
+
+### Fixed
+
+Found on the bench before release (APA board, DS18B20 in hot water / ice, fake pressure):
+- Solar extra runs went on during a latched pump alarm (a dry pump kept running for solar heating).
+- After an alarm was acknowledged while solar was heating, the heater switched on for its whole minimum
+  ON time: it is checked before solar re-evaluates, and the alarm had cleared solar's state. "Solar first"
+  now also holds while solar **can** heat (valid collector above pool + startDelta, inside the day gate).
+- A saved `AuxMode` switched the AUX relay on in a sketch that never called `enableAux()` this boot. A
+  saved mode now never activates a relay the sketch did not register.
+
+Found in review:
+
+- **Freeze protection was off exactly below 0 °C** — readings below 0 were treated as "not ready". They are
+  valid now; an invalid reading no longer ends an active protection, which ends only at threshold +
+  `APAPUMP_FREEZE_HYST_C` (1.0 °C; before, no hysteresis).
+- Missing collector sensor (−127) made solar cooling run nonstop while the pool was above `maxPoolTemp`;
+  the DS18B20 power-on value 85.0 started a false overheat run. Both are invalid readings now.
+- Example 02: `rtc.getEpoch()` does not exist in the DS3231 library (→ `RTClib::now().unixtime()`); the
+  time of day was never updated, so the schedule never switched the pump; the hand-written schedule check
+  missed slots across midnight (→ `gui.isTimerActive()`); the in-sketch `#define APA_LCD_USE_DS3231` caused
+  a link error and is removed. The same `getEpoch()` call was fixed in README, API.md and example 03.
+- Docs: `begin()` writes all relays OFF as `0xFF` on the active-low default board (README said `0x00`);
+  overriding `APAPUMP_EEPROM_ADDR` needs `build_flags` (a sketch `#define` does not reach the library .cpp).
+
+### Footprint
+
+- +13–16 B RAM, about +1.5 KB flash (example 01; all five examples on all five platforms, zero library warnings).
+
 ## [1.2.0] — 2026-10-01
 
 ### Added

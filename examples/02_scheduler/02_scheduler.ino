@@ -15,8 +15,8 @@
 //
 // Required libraries:  APAPUMP, APALCDGUI, DS3231, LiquidCrystal
 
-#define APA_LCD_USE_DS3231          // compile in DS3231 RTC modal
 #include <Wire.h>
+#include <DS3231.h>                 // RTClib::now() for the time of day
 #include <APAPUMP.h>
 #include <APALCDGUI.h>
 
@@ -29,17 +29,12 @@ DS3231    rtc;
 // ---- Schedule helper ---------------------------------------------------------
 // Returns true when current time falls inside any enabled timer slot.
 // Called every update() — keep it fast (no I2C here; use a cached time variable).
+// isTimerActive() also handles slots that run across midnight (e.g. 22:00-02:00).
 
 uint8_t  rtcHour = 0, rtcMinute = 0;   // refreshed in loop()
 
 bool scheduleActive() {
-    uint16_t nowMin = rtcHour * 60 + rtcMinute;
-    for (uint8_t i = 0; i < APA_LCD_MAX_TIMERS; i++) {
-        if (gui.isTimerEnabled(i) &&
-            nowMin >= gui.getTimerStart(i) &&
-            nowMin <  gui.getTimerEnd(i)) return true;
-    }
-    return false;
+    return gui.isTimerActive(rtcHour * 60 + rtcMinute);
 }
 
 // ---- Home screen -------------------------------------------------------------
@@ -114,7 +109,6 @@ void setup() {
 
     // GUI must be initialised before pump so timer callbacks are ready
     gui.begin();
-    gui.setRTC(&rtc);                            // enable RTC modal (both-buttons hold)
     gui.addHomeScreen(drawHome);
     gui.addTimerScreen(SCREEN_RIGHT, nullptr);   // timer screen on right side
 
@@ -133,7 +127,7 @@ void setup() {
     pump.setStatusCallback(onStatus);
 
     // Midnight callback — drives daily counter rollover and manual-auto-reset
-    pump.setMidnightCallback([]() { return rtc.getEpoch(); });
+    pump.setMidnightCallback([]() { return RTClib::now().unixtime(); });
     pump.setManualAutoReset(true);               // return to AUTO at midnight
 }
 
@@ -145,9 +139,9 @@ static uint32_t lastRtcMs = 0;
 void loop() {
     if (millis() - lastRtcMs >= 1000UL) {
         lastRtcMs = millis();
-        RTClib::now().hour();   // read via DS3231
-        // Replace with your RTC library's time access:
-        // DateTime now = rtc.now(); rtcHour = now.hour(); rtcMinute = now.minute();
+        DateTime now = RTClib::now();   // NorthernWidget DS3231 library
+        rtcHour   = now.hour();
+        rtcMinute = now.minute();
     }
 
     gui.update();

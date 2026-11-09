@@ -1,4 +1,4 @@
-# APAPUMP API Reference — v1.2.0
+# APAPUMP API Reference — v1.3.0
 
 ## Quick-start examples
 
@@ -38,11 +38,15 @@ Call these in order — some are optional:
 | 2 | `adc.begin()` | If using APASENSE — must precede `pump.begin()` |
 | 3 | `pump.setActiveLow()` | DIRECT mode only, active-low modules |
 | 4 | `pump.begin(scheduleCb, externalRequestCb, dailyTargetCb)` | Always |
-| 5 | `pump.enableUVC()`, `enableAux()`, `enableSolar()` | Optional |
+| 5 | `pump.setPoolTempCallback()`, `enableUVC()`, `enableAux()`, `enableSolar()`, `setSolarDayNight()` | Optional |
 | 6 | `pump.enablePressure()`, `setCurrentCallback()` | Optional |
 | 7 | `pump.enableFreezeProtection()`, `setPressurePeakAlarm()` | Optional |
 | 8 | `pump.setMidnightCallback()` | Optional — enables RTC midnight reset |
 | 9 | `pump.setDailyTarget()`, `setCatchupWindow()` | Optional |
+| 10 | `if (!pump.hasSavedSettings()) { … }` — your first-boot defaults (`setSolarMode()`, `setAuxMode()` …) | Optional |
+
+Saved settings (solar mode, Max pool, AUX mode, heater target, pressure ON/OFF) are loaded by `begin()`;
+`enableSolar()` / `enableAux()` give first-boot defaults only. See [Saved settings](#saved-settings).
 
 ---
 
@@ -154,7 +158,7 @@ void setManualMode(ManualMode m);
 | Value | Behaviour |
 |-------|-----------|
 | `FORCE_ON` | Pump forced on. All timing guards suspended. Solar valve closes immediately. |
-| `FORCE_OFF` | Pump forced off. All timing guards suspended. Solar safety (P0) still applies. |
+| `FORCE_OFF` | Pump forced off. All timing guards suspended. Solar overheat protection is skipped (since 1.3.0; it runs only in `AUTO`). |
 | `AUTO` | Return to automatic control. Fires status callback. |
 
 ---
@@ -348,11 +352,68 @@ Enable UVC sanitizer relay (PCF P1 / DIRECT pin b). UVC turns ON `preDelayS` sec
 void enableAux(uint16_t startDelayS = 10, uint16_t stopLeadS = 30);
 ```
 
-Enable AUX device relay (PCF P2 / DIRECT pin c — heat pump, ozone, etc.). AUX turns ON `startDelayS` seconds after pump starts; turns OFF `stopLeadS` seconds before pump stops. No-op if aux pin is `0xFF`.
+Enable AUX device relay (PCF P2 / DIRECT pin c — heat pump, ozone, etc.). AUX turns ON `startDelayS` seconds after pump starts; turns OFF `stopLeadS` seconds before pump stops (= the pump's after-run; heat pumps usually want 60–180 s). No-op if aux pin is `0xFF`. First-boot mode `AUX_FOLLOWER` (1.2.0 behaviour); a saved `setAuxMode()` wins.
+
+---
+
+### `setAuxMode()` / `getAuxMode()`
+
+```cpp
+void    setAuxMode(AuxMode m);   // saved
+AuxMode getAuxMode() const;
+```
+
+| Mode | AUX relay |
+|---|---|
+| `AUX_DISABLED` | never on (switched off at once if on) |
+| `AUX_FOLLOWER` | on/off with the pump — unchanged from 1.2.0 |
+| `HEATER_SIMPLE` | heat pump allowed; its own thermostat regulates |
+| `HEATER_FULL` | the library is the thermostat (`setHeaterTarget()`) |
+
+Heater modes switch AUX on only while: the pump runs past `startDelayS` · no pump alarm is latched ·
+solar is not heating, could not heat right now (valid collector above pool + startDelta inside the day
+gate) and the collector is not above `safetyTemp` (solar first) · the permit callback (if
+any) returns `true` · the pool is not above Max pool (when set and valid). `HEATER_FULL` adds: valid pool
+reading, on below target − `APAPUMP_HEATER_HYST_C`, off at the target. Minimum ON/OFF time
+`APAPUMP_HEATER_MIN_ON_SEC` / `APAPUMP_HEATER_MIN_OFF_SEC` (600 s), also after power-up; a pump alarm or
+pump stop ends it at once. No extra pump runs are requested. In heater modes the stop lead is skipped when AUX was already off.
+
+---
+
+### `setHeaterTarget()` / `getHeaterTarget()`
+
+```cpp
+void    setHeaterTarget(uint8_t celsius);   // saved, clamped to 15–40, default 28
+uint8_t getHeaterTarget() const;
+```
+
+`HEATER_FULL` only. Set the heat pump's own thermostat to its maximum, otherwise the lower setting wins.
+
+---
+
+### `setHeaterPermitCallback()` / `isHeaterOn()`
+
+```cpp
+void setHeaterPermitCallback(bool (*cb)());   // nullptr = always allowed (default)
+bool isHeaterOn() const;                      // AUX relay on in a heater mode
+```
+
+The permit callback can carry a cheap-tariff input. Heater modes only.
 
 ---
 
 ## Solar heating
+
+### `setPoolTempCallback()`
+
+```cpp
+void setPoolTempCallback(float (*cb)());
+```
+
+Pool temperature (°C) for solar and `HEATER_FULL`. `enableSolar()`'s `poolTempCb` sets the same callback
+(`nullptr` there keeps this one). Return `-127.0f` while not ready. See [Valid temperatures](#valid-temperatures).
+
+---
 
 ### `enableSolar()`
 
@@ -371,20 +432,73 @@ void enableSolar(
 );
 ```
 
+Registers the sensors and constants — call it every boot.
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `solarTempCb` | — | Absorber temperature callback (°C). Required. |
-| `poolTempCb` | `nullptr` | Pool temperature callback (°C). If `nullptr`, pool temperature is treated as 0°C — `startDelta` becomes an absolute absorber threshold. |
-| `useValve` | `false` | Open the solar valve relay (P3) when solar drives the pump. Valve closes in manual mode. |
-| `startDelta` | 8.0 | Start when absorber > pool + startDelta (°C) |
-| `stopDelta` | 3.0 | Stop when absorber < pool + stopDelta (°C). Must be < startDelta. |
-| `maxPoolTemp` | 0.0 | Pool cooling threshold (°C). 0 = disabled. When pool > maxPoolTemp and absorber < pool − coolDelta, pump runs to cool the pool. |
+| `solarTempCb` | — | Collector (absorber) temperature callback (°C). Required. |
+| `poolTempCb` | `nullptr` | Pool temperature callback (°C). `nullptr` keeps `setPoolTempCallback()`. **Required for solar** — without a valid pool reading solar does nothing (since 1.3.0; before, a missing pool reading counted as 0 °C). |
+| `useValve` | `false` | First-boot default: `true` → `SOLAR_VALVE`, `false` → `SOLAR_PUMP`. A saved `setSolarMode()` wins. |
+| `startDelta` | 8.0 | Start heating when collector > pool + startDelta (°C) |
+| `stopDelta` | 3.0 | Stop heating when collector < pool + stopDelta (°C). Must be < startDelta. |
+| `maxPoolTemp` | 0.0 | First-boot Max pool (°C, 0 = no limit). Above it: no solar heating, and cooling runs when collector < pool − coolDelta. A saved `setSolarMaxPool()` wins. |
 | `coolDelta` | 2.0 | Cooling dead-band (°C) |
-| `safetyTemp` | 50.0 | Absorber safety temperature (°C). Above this, pump is forced ON + valve OPEN regardless of manual mode (Priority 0). |
-| `valveMode` | `VALVE_SUSTAINED` | `VALVE_SUSTAINED`: valve stays open while solar runs. `VALVE_PULSE`: brief pulse to actuate motor-driven valve (hardware stub). |
+| `safetyTemp` | 50.0 | Overheat protection (°C): pump ON + valve OPEN — **only in `AUTO` and never during a pump alarm** (since 1.3.0). |
+| `valveMode` | `VALVE_SUSTAINED` | `VALVE_SUSTAINED`: valve relay stays on while open. `VALVE_PULSE`: hardware stub, not implemented. |
 | `pulseDurationMs` | 500 | Pulse duration when `valveMode = VALVE_PULSE` |
 
-When solar is enabled, solar logic is the sole on/off driver. The `scheduleCb` from `begin()` is used only to determine the daily target, not for on/off.
+Default drive `SOLAR_WITH_SCHEDULE`: the schedule keeps driving the pump; solar heating and cooling are
+extra runs. The valve follows the solar demand on every `update()`, also during a scheduled run, and is
+closed in manual mode. After every valve change the pressure checks and baseline learning pause for
+`APAPUMP_VALVE_SETTLE_SEC` (30 s). While a pump alarm is latched, solar requests no runs at all (heating,
+cooling, overheat).
+
+---
+
+### `setSolarMode()` / `getSolarMode()`
+
+```cpp
+void      setSolarMode(SolarMode m);   // saved
+SolarMode getSolarMode() const;
+```
+
+`SOLAR_OFF`: no solar logic, no overheat protection, valve closed. `SOLAR_PUMP`: no valve — solar only
+switches the filtration pump. `SOLAR_VALVE`: 3-way valve on P3; stored as `SOLAR_PUMP` if no valve relay is wired.
+
+---
+
+### `setSolarMaxPool()` / `getSolarMaxPool()`
+
+```cpp
+void    setSolarMaxPool(uint8_t celsius);   // saved; 0 = no limit
+uint8_t getSolarMaxPool() const;
+```
+
+Whole °C. 0 = no limit — **no cooling and no heating cap**. Also caps both heater modes.
+
+---
+
+### `setSolarDrive()`
+
+```cpp
+void setSolarDrive(SolarDrive d);   // not saved — call in setup()
+```
+
+`SOLAR_WITH_SCHEDULE` (default) or `SOLAR_WITH_CATCHUP` (1.2.0 behaviour: solar is the only driver, the
+schedule gives the daily target, catch-up fills the gap — see `setCatchupWindow()`).
+
+---
+
+### Solar status
+
+```cpp
+bool isSolarRunning() const;       // solar heating or cooling is commanding the pump
+bool isSolarValveOpen() const;     // valve relay commanded open
+bool isSolarSafetyActive() const;  // collector above safetyTemp — reported in every mode
+bool isSolarSensorOk() const;      // false while solar is on and collector or pool is invalid
+```
+
+`isSolarSafetyActive()` is true even when the pump is held off (manual mode, pump alarm), so a sketch can warn.
 
 ---
 
@@ -396,7 +510,21 @@ void setSolarDayNight(uint32_t (*epochCb)(),
                       uint8_t  nightStartHour = 20);
 ```
 
-Restrict solar heating to daytime hours. Pool cooling is still allowed at night. Requires a Unix epoch callback (e.g. `[]() { return rtc.getEpoch(); }`).
+Allow solar **heating** only between the two hours; cooling stays temperature-based, day or night.
+Callback: a Unix epoch in **local time**, e.g. `[]() { return RTClib::now().unixtime(); }` (NorthernWidget DS3231).
+
+**Why it exists:** a safety net for a collector sensor in the wrong place. On a pipe near the pump room
+instead of on the absorber, it can read "warmer than the pool" in the evening or at night, and solar would
+push water through a cold absorber — cooling the pool. Use wide hours (e.g. `6, 21`): a dark roof often
+still gains heat after 20:00.
+
+---
+
+### Valid temperatures
+
+A reading is used only if it is within `APAPUMP_TEMP_MIN_C` … `APAPUMP_TEMP_MAX_C` (−20 … 100 °C) and not
+exactly 85.0 (DS18B20 power-on value) or −1.0 (the "not ready" value of APAPUMP ≤ 1.2.0). Return
+`-127.0f` while a sensor is not ready. Used by solar (collector and pool), `HEATER_FULL` and freeze protection.
 
 ---
 
@@ -458,7 +586,7 @@ void setPressureEnabled(bool on);
 bool isPressureEnabled() const;
 ```
 
-Switch pressure monitoring off or on at runtime, after `enablePressure()` — for installations without a pressure sensor, typically from an installer menu (persist the choice in your sketch).
+Switch pressure monitoring off or on at runtime, after `enablePressure()` — for installations without a pressure sensor, typically from an installer menu. **Saved** since 1.3.0: a saved OFF also wins over the next boot's `enablePressure()`.
 
 | | OFF | ON |
 |---|---|---|
@@ -467,7 +595,7 @@ Switch pressure monitoring off or on at runtime, after `enablePressure()` — fo
 | Last reading, learned baselines | cleared | re-learned (~80 s of running) |
 | Stored clean-filter pressure | kept | used again |
 
-An alarm already raised stays until `acknowledgeAlarm()`. `setPressureEnabled(true)` does nothing if `enablePressure()` was never called. Default after `enablePressure()`: ON.
+An alarm already raised stays until `acknowledgeAlarm()`. `setPressureEnabled(true)` does nothing if `enablePressure()` was never called. First-boot default: ON.
 
 ---
 
@@ -615,7 +743,7 @@ void enableFreezeProtection(float (*tempCb)(),
                              float thresholdC = APAPUMP_FREEZE_THRESHOLD_C);
 ```
 
-Enable freeze protection at Priority 4. When `tempCb()` returns a value below `thresholdC` (default 4.5 °C), the pump **cycles** to prevent pipe freeze: it runs for `APAPUMP_FREEZE_ON_SEC` (5 min), then rests for `APAPUMP_FREEZE_OFF_SEC` (10 min), repeating until temperature rises above threshold. Brief periodic circulation is sufficient to prevent freezing and saves significant energy over continuous operation. `tempCb` returns `°C`; return `-1.0f` when sensor is not ready (protection stays inactive).
+Enable freeze protection at Priority 4. When `tempCb()` returns a value below `thresholdC` (default 4.5 °C), the pump **cycles** to prevent pipe freeze: it runs for `APAPUMP_FREEZE_ON_SEC` (5 min), then rests for `APAPUMP_FREEZE_OFF_SEC` (10 min), repeating until a valid reading reaches `thresholdC + APAPUMP_FREEZE_HYST_C` (1.0 °C). Brief periodic circulation is sufficient to prevent freezing and saves significant energy over continuous operation. `tempCb` returns °C; readings below 0 °C are valid (since 1.3.0 — before, protection was off exactly below 0 °C). Return `-127.0f` (or `-1.0f`) while the sensor is not ready: an invalid reading never starts **or ends** a protection.
 
 **Dry-run interlock:** if `enablePressure()` is active, pressure is calibrated, and the EMA baseline confirms no water in the pipes, freeze protection is suppressed — forcing the pump on dry would damage the motor.
 
@@ -639,7 +767,7 @@ Returns `true` when freeze protection is active (temperature below threshold). T
 void setCatchupWindow(uint8_t startHour, uint8_t endHour);
 ```
 
-Restrict daily catch-up runtime to a specific hour window. Example: `setCatchupWindow(8, 20)` allows catch-up only between 08:00 and 20:00. Window wraps midnight if `startHour > endHour`. Silently ignored without `setMidnightCallback()`. Requires solar mode (catch-up logic is in the solar branch of the priority engine).
+Restrict daily catch-up runtime to a specific hour window. Example: `setCatchupWindow(8, 20)` allows catch-up only between 08:00 and 20:00. Window wraps midnight if `startHour > endHour`. Silently ignored without `setMidnightCallback()`. Catch-up is used only with `setSolarDrive(SOLAR_WITH_CATCHUP)`; it runs as soon as today's runtime is below the target (from midnight or the window start).
 
 ---
 
@@ -683,6 +811,16 @@ enum ValveMode : uint8_t { VALVE_SUSTAINED, VALVE_PULSE };
 
 `VALVE_SUSTAINED`: valve relay stays on while solar runs. `VALVE_PULSE`: brief pulse for motor-driven valves (hardware stub — pulse not yet implemented).
 
+### `SolarMode` / `SolarDrive` / `AuxMode`
+
+```cpp
+enum SolarMode  : uint8_t { SOLAR_OFF, SOLAR_PUMP, SOLAR_VALVE };                    // saved
+enum SolarDrive : uint8_t { SOLAR_WITH_SCHEDULE, SOLAR_WITH_CATCHUP };               // not saved
+enum AuxMode    : uint8_t { AUX_DISABLED, AUX_FOLLOWER, HEATER_SIMPLE, HEATER_FULL }; // saved
+```
+
+See `setSolarMode()`, `setSolarDrive()`, `setAuxMode()`.
+
 ### `FilterStatus`
 
 ```cpp
@@ -712,11 +850,27 @@ All non-NONE alarms are latching — call `acknowledgeAlarm()` to clear.
 
 ---
 
+## Saved settings
+
+The library saves only owner/installer settings: solar mode, Max pool, AUX mode, heater target, pressure
+ON/OFF (plus daily target, minimum run time, clean pressure as before). Constants — deltas, safety
+temperature, day-gate hours, drive model, timings — are not saved; pass them in `setup()` every boot.
+Saved setters write the EEPROM only after `begin()`. A saved mode never activates hardware by itself:
+solar needs `enableSolar()`, the AUX relay `enableAux()` or `setAuxMode()`, in every boot.
+
+```cpp
+bool hasSavedSettings() const;   // true if valid saved settings were loaded by begin()
+```
+
+Use it for your own first-boot defaults: `if (!pump.hasSavedSettings()) pump.setSolarMode(SOLAR_OFF);`
+
+---
+
 ## Constants
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `APAPUMP_VERSION` | `"1.2.0"` | Library version string |
+| `APAPUMP_VERSION` | `"1.3.0"` | Library version string |
 | `APAPUMP_MIN_OFF_SEC` | 60 | Minimum pause after pump stops (non-manual) |
 | `APAPUMP_MIN_RUN_SEC` | 300 | Default minimum run time before stopping |
 | `APAPUMP_VALVE_PULSE_MS` | 500 | Default pulse width for `VALVE_PULSE` mode |
@@ -727,6 +881,7 @@ All non-NONE alarms are latching — call `acknowledgeAlarm()` to clear.
 | `APAPUMP_FREEZE_OFF_SEC` | 600 | Freeze cycle: rest between runs (10 min) |
 | `APAPUMP_PRESSURE_DRYRUN_PCT` | 40 | Pressure must be ≥ this % of EMA baseline to confirm flow |
 | `APAPUMP_PRESSURE_ABS_MIN` | 0.1 | Minimum pressure (bar) of a running pump: dry-run limit before the EMA builds; lower readings are never learned |
+| `APAPUMP_HEATER_TARGET_MIN` / `_MAX` | 15 / 40 | `setHeaterTarget()` range (°C) |
 
 ---
 
@@ -736,10 +891,16 @@ Set in `build_flags` (PlatformIO) so the library and your sketch see the same va
 
 | Define | Default | Meaning |
 |--------|---------|---------|
-| `APAPUMP_EEPROM_ADDR` | 520 | EEPROM base address (uses 12 bytes) |
+| `APAPUMP_EEPROM_ADDR` | 520 | EEPROM base address (uses 15 bytes) |
 | `APAPUMP_CURRENT_MIN_A` | 0.5 | Current (A) below which readings are ignored — no motor on the sensor |
 | `APAPUMP_FILTER_WARN_DELTA` | 0.4 | Filter status: `FILTER_FILLING` at clean + this (bar) |
 | `APAPUMP_FILTER_BACKWASH_DELTA` | 0.8 | Filter status: `FILTER_BACKWASH_NEEDED` at clean + this (bar) |
+| `APAPUMP_TEMP_MIN_C` / `APAPUMP_TEMP_MAX_C` | −20 / 100 | Valid temperature range (°C) |
+| `APAPUMP_FREEZE_HYST_C` | 1.0 | Freeze protection ends at threshold + this (°C) |
+| `APAPUMP_VALVE_SETTLE_SEC` | 30 | No pressure checks / learning after a valve change (s) |
+| `APAPUMP_HEATER_HYST_C` | 1.0 | `HEATER_FULL`: on below target − this (°C) |
+| `APAPUMP_HEATER_MIN_ON_SEC` / `_MIN_OFF_SEC` | 600 / 600 | Heater short-cycling guard (s) |
+| `APAPUMP_HEATER_TARGET_DEFAULT` | 28 | First-boot heater target (°C) |
 
 ```ini
 build_flags = -DAPAPUMP_CURRENT_MIN_A=0.3f -DAPAPUMP_FILTER_BACKWASH_DELTA=1.0f
@@ -749,23 +910,26 @@ build_flags = -DAPAPUMP_CURRENT_MIN_A=0.3f -DAPAPUMP_FILTER_BACKWASH_DELTA=1.0f
 
 ## EEPROM layout
 
-Base address: `APAPUMP_EEPROM_ADDR` (default 520). Total: **12 bytes** (520–531).
+Base address: `APAPUMP_EEPROM_ADDR` (default 520). Total: **15 bytes** (520–534), layout version 2 (1.3.0). Upgrading from 1.2.0 resets the block once.
 
 ### Field map
 
 | Offset | Address | Bytes | Content | Written by |
 |--------|---------|-------|---------|-----------|
 | 0 | 520 | 2 | Magic `0xA55A` | Validity marker — always written |
-| 2 | 522 | 1 | Config version `1` | Mismatch → factory reset on next boot |
+| 2 | 522 | 1 | Config version `2` | Mismatch → factory reset on next boot |
 | 3 | 523 | 2 | Daily target (minutes) | `setDailyTarget()` |
 | 5 | 525 | 2 | Yesterday's runtime (minutes) | Midnight rollover |
 | 7 | 527 | 2 | Minimum run time (seconds) | `setMinRunTime()` |
 | 9 | 529 | 2 | Clean pressure × 100 (bar; 0 = not learned) | Automatic first learn, `learnCleanPressure()`, `setCleanPressure()` |
-| 11 | 531 | 1 | Checksum (byte sum of offsets 0–10) | Corruption guard |
+| 11 | 531 | 1 | Settings: bit 0 pressure ON, bits 1–2 `SolarMode`, bits 3–4 `AuxMode` | `setPressureEnabled()`, `setSolarMode()`, `setAuxMode()` |
+| 12 | 532 | 1 | Max pool (°C, 0 = no limit) | `setSolarMaxPool()` |
+| 13 | 533 | 1 | Heater target (°C) | `setHeaterTarget()` |
+| 14 | 534 | 1 | Checksum (byte sum of offsets 0–13) | Corruption guard |
 
 ### Write protection and EEPROM lifespan
 
-`_saveEEPROM()` always writes the full 12-byte struct, but a physical write only occurs when a byte has actually changed:
+`_saveEEPROM()` always writes the full 15-byte struct, but a physical write only occurs when a byte has actually changed:
 
 | Platform | Mechanism | Granularity |
 |----------|-----------|-------------|
@@ -788,10 +952,9 @@ Result: calling `setMinRunTime(300)` from `setup()` every boot with 300 already 
 
 ### Overriding the base address
 
-```cpp
-// Place before #include — use if another library conflicts with address 520:
-#define APAPUMP_EEPROM_ADDR  532
-#include <APAPUMP.h>
+```ini
+; platformio.ini — a #define in the sketch would not reach the library's own .cpp
+build_flags = -DAPAPUMP_EEPROM_ADDR=535
 ```
 
 ### APA EEPROM address map
@@ -807,8 +970,8 @@ Result: calling `setMinRunTime(300)` from `setup()` every boot with 300 already 
 | 500–501 | 2 | used | APALCDGUI brightness |
 | 502–508 | 7 | used | APALCDGUI timers (default 3 slots; extends to 514 with `MAX_TIMERS=6`) |
 | 509–519 | 11 | **free** | — intentional gap before APAPUMP ¹ |
-| **520–531** | **12** | **used** | **APAPUMP** |
-| 532–581 | 50 | **free** | — APAPUMP expansion reserve |
+| **520–534** | **15** | **used** | **APAPUMP** (12 bytes before 1.3.0) |
+| 535–581 | 47 | **free** | — APAPUMP expansion reserve |
 | 582–587 | 6 | used | APASENSE (pressure zero) |
 | 588– | — | **free** | — |
 

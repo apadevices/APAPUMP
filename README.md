@@ -5,7 +5,7 @@
 </p>
 
 **Autonomous filtration pump controller for APA Devices pool automation**
-· ![v1.2.0](https://img.shields.io/badge/version-1.2.0-blue)
+· ![v1.3.0](https://img.shields.io/badge/version-1.3.0-blue)
 · ![Platforms](https://img.shields.io/badge/platforms-AVR%20ESP8266%20ESP32%20STM32-brightgreen)
 
 ---
@@ -26,14 +26,24 @@
 
 ### Follower devices
 - **UVC sanitizer** — ON before pump, OFF after (configurable pre/post delay)
-- **AUX device** (heat pump, ozone, etc.) — ON after pump, OFF before pump stops
-- **Solar valve** — opens when solar drives the pump; instantly closes in manual mode
+- **AUX device** — plain follower (ozone etc.), or a **heat pump** in `HEATER_SIMPLE` / `HEATER_FULL` ([details](#heater-heat-pump-on-the-aux-relay))
+- **Solar valve** — follows the solar demand, also during a scheduled run; instantly closes in manual mode
 
 ### Solar heating
+- Extra runs on top of your schedule: heating (collector warmer than the pool) and cooling (pool above Max pool)
 - Absorber–pool temperature dead-band hysteresis (configurable start/stop deltas)
-- Pool cooling: runs in reverse when pool temperature exceeds maximum
-- Day/night boundary gate via RTC epoch callback
-- **Solar safety (Priority 0):** absorber too hot → pump ON + valve OPEN, overrides even `FORCE_OFF`
+- Invalid temperatures (missing sensor, DS18B20 power-on value) stop all solar logic — never acted on
+- Day/night gate for heating — a safety net for a badly placed collector sensor ([why](#daynight-gate--why-it-exists))
+- **Overheat protection:** collector too hot → pump ON + valve OPEN, in AUTO only and never during a pump alarm
+
+### Heater (heat pump)
+- **Solar first** — the heat pump waits while solar heats
+- Never heats without flow: off on any pump alarm; 10-minute minimum ON/OFF against compressor short-cycling
+- `HEATER_SIMPLE` (the heat pump's own thermostat regulates) or `HEATER_FULL` (the library is the thermostat)
+- Permit hook for a cheap-tariff input
+
+### Saved settings
+- Solar mode, Max pool, AUX/heater mode, heater target and pressure ON/OFF survive a reboot ([details](#saved-settings))
 
 ### Safety alarms
 - **Overcurrent** — learns the pump's own normal current, alarms at × 1.5; no pump rating to enter; silent with an external contactor ([details](#overcurrent-protection))
@@ -41,7 +51,7 @@
 - **Overpressure** — absolute hard limit at `maxPressure` (the filter's rated pressure); optional sudden-rise alarm
 - **Pressure monitoring can be switched off at runtime** — `setPressureEnabled(false)` for installations without a pressure sensor ([details](#pressure-sensor-optional))
 - **Learned baselines never learn a fault** — no learning while an alarm is active, nor from a dry pipe or a motor-less current sensor
-- **Freeze protection** — pool temp below 4.5 °C → cyclic run (5 min ON / 10 min rest); suppressed if dry-run detected
+- **Freeze protection** — pool temp below 4.5 °C → cyclic run (5 min ON / 10 min rest), also below 0 °C; a missing reading never ends it; suppressed if dry-run detected
 - **No-flow stub** — flow switch confirmed after settle; hardware-ready for future sensor
 - All alarms are latching — explicit `acknowledgeAlarm()` required
 
@@ -50,9 +60,9 @@
 - Clean pressure learned automatically on the first run; one call after each backwash re-learns it
 
 ### Engineering
-- **564 B SRAM** on Arduino Uno with all features registered — fits comfortably in 2 KB
-- 23 boolean flags packed into 3 bytes; all string literals in flash (`F()` macro)
-- EEPROM: 12 bytes, magic + version + checksum validation, persists target and clean pressure
+- **577 B SRAM** on Arduino Uno (example 01) — fits comfortably in 2 KB
+- 32 boolean flags / small modes packed into 4 bytes; all string literals in flash (`F()` macro)
+- EEPROM: 15 bytes, magic + version + checksum validation, persists target, clean pressure and settings
 - Zero `delay()` calls — every path returns within one `loop()` iteration
 - Designed to integrate with APADOSE and APALCDGUI via callback bridges — no coupling
 
@@ -72,7 +82,7 @@ lib_deps =
 
 ## What It Does
 
-APAPUMP controls a pool filtration pump and up to three follower devices (UVC lamp, AUX device, solar valve) through a PCF8574AT I2C relay expander or direct Arduino output pins. Each call to `update()` in your `loop()` advances the state machine, checks every safety guard in priority order, and fires alarm callbacks when something is wrong — all without blocking.
+APAPUMP controls a pool filtration pump and up to three follower devices (UVC lamp, AUX device or heat pump, solar valve) through a PCF8574AT I2C relay expander or direct Arduino output pins. Each call to `update()` in your `loop()` advances the state machine, checks every safety guard in priority order, and fires alarm callbacks when something is wrong — all without blocking.
 
 Out of the box, the zero-arg constructor targets the APA Devices HMI board v1.0: PCF8574AT at 0x3C with pump on P0, UVC on P1, AUX on P2, and solar valve on P3. Every optional feature is **disabled by default** and activated with one method call.
 
@@ -127,15 +137,19 @@ Every `update()` tick calls the priority engine. The first rule that matches win
 
 | Priority | Condition | Result |
 |----------|-----------|--------|
-| **P0** | Solar absorber > safety temp (default 50 °C) | Pump ON + valve OPEN — overrides FORCE_OFF |
+| **P0** | Collector > safety temp (default 50 °C), **AUTO only, no pump alarm** | Pump ON + valve OPEN |
 | **P1** | `FORCE_OFF` manual mode | Pump OFF |
 | **P2** | `FORCE_ON` manual mode | Pump ON |
 | **P3** | External request callback returns `true` | Pump ON |
 | **P4** | Freeze: pool temp < threshold AND water present | Pump ON |
-| **P5a** | Solar: absorber > pool + startDelta | Pump ON (hysteresis) |
-| **P5b** | Catch-up: daily runtime < daily target (window OK) | Pump ON |
-| **P5c** | Schedule callback returns `true` | Pump ON |
+| **P5a** | Solar wants to run: heating (hysteresis) or cooling | Pump ON |
+| **P5b** | Schedule callback returns `true` (default `SOLAR_WITH_SCHEDULE`, or no solar) | Pump ON |
+| **P5b'** | `SOLAR_WITH_CATCHUP` only: daily runtime < target (window OK) — replaces P5b | Pump ON |
 | — | None of the above | Pump OFF |
+
+Before 1.3.0, P0 also overrode `FORCE_OFF`. It no longer does: manual OFF usually means someone is
+working at the pump, and after a dry-run alarm there is no water to circulate. The collector has its own
+vent valve for overheating.
 
 ### PCF relay layout (APA HMI board v1.0 defaults)
 
@@ -153,7 +167,7 @@ PCF8574AT at I2C address 0x3C
 └─ P7 ── Extension relay         (optional — setExtraOutput(7, on/off))
 ```
 
-PCF HIGH = relay ON, LOW = relay OFF. `begin()` writes `0x00` immediately — all relays start OFF.
+The zero-arg constructor is **active-low** (the board's 74HC240 inverts): PCF LOW = relay ON. `begin()` writes all relays OFF immediately (`0xFF`), before any other code runs.
 
 ---
 
@@ -253,7 +267,7 @@ pump.setManualTimeout(60);                           // or set at any time
 pump.setManualAutoReset(true);
 ```
 
-**Note:** Solar safety (P0) still applies even in `FORCE_OFF`. If the absorber reaches the safety temperature, the pump runs to prevent heat damage regardless of manual mode.
+**Note:** solar overheat protection (P0) runs only in `AUTO` (since 1.3.0). In `FORCE_OFF`/`FORCE_ON` it is skipped — `isSolarSafetyActive()` still reports a hot collector so your sketch can warn.
 
 ---
 
@@ -265,11 +279,10 @@ Each follower is independent and optional. Wire the relay to the corresponding P
 // UVC lamp: ON 5 s before pump, OFF 30 s after pump stops
 pump.enableUVC(5, 30);
 
-// AUX device (heat pump, ozone): ON 10 s after pump starts, OFF 30 s before pump stops
+// AUX device: ON 10 s after pump starts, OFF 30 s before pump stops (plain follower)
 pump.enableAux(10, 30);
 
-// Solar valve: open when solar logic drives the pump
-// useValve=true enables the valve relay on P3 (or direct pin d)
+// Solar valve on P3 (or direct pin d): follows the solar demand
 pump.enableSolar(absorberTempCb, poolTempCb, /*useValve=*/true, ...);
 ```
 
@@ -279,27 +292,64 @@ pump.enableSolar(absorberTempCb, poolTempCb, /*useValve=*/true, ...);
 
 ## Solar Heating
 
-Solar logic becomes the **sole on/off driver** when enabled — the schedule callback is only used for the daily runtime target.
+By default (`SOLAR_WITH_SCHEDULE`) your **schedule keeps driving the pump** and solar adds extra runs:
+heating when the collector is warmer than the pool, cooling when the pool is above Max pool. During a
+scheduled run the valve opens whenever solar heating or cooling wants it, and closes again when not.
 
 ```cpp
+pump.setPoolTempCallback([]() { return poolTemp; });   // shared by solar, heater FULL
 pump.enableSolar(
-    []() { return adc.getSolarTemp(); },   // absorber temperature callback
-    []() { return adc.getPoolTemp(); },    // pool temperature callback (optional)
-    true,                                  // useValve — open valve when solar running
-    8.0f,                                  // startDelta: start when absorber > pool + 8°C
-    3.0f,                                  // stopDelta:  stop  when absorber < pool + 3°C
-    32.0f,                                 // maxPoolTemp: pool cooling if pool > 32°C
-    2.0f,                                  // coolDelta: cool when absorber < pool - 2°C
-    50.0f                                  // safetyTemp: force pump ON if absorber > 50°C
+    []() { return collectorTemp; },   // collector (absorber) temperature, °C
+    nullptr,                          // pool temp: nullptr = keep setPoolTempCallback()
+    true,                             // useValve — first-boot default (SOLAR_VALVE / SOLAR_PUMP)
+    8.0f,                             // startDelta: start when collector > pool + 8 °C
+    3.0f,                             // stopDelta:  stop  when collector < pool + 3 °C
+    32.0f,                            // maxPoolTemp — first-boot default, 0 = no limit
+    2.0f,                             // coolDelta: cool when collector < pool - 2 °C
+    60.0f                             // safetyTemp: overheat protection (AUTO only)
 );
+pump.setSolarDayNight([]() { return RTClib::now().unixtime(); }, 6, 21);   // heating 06:00-21:00
 
-// Optional: restrict solar heating to daytime hours
-pump.setSolarDayNight(
-    []() { return rtc.getEpoch(); },       // Unix epoch callback
-    7,                                     // daytime starts at 07:00
-    20                                     // daytime ends at 20:00
-);
+// From a menu (saved, survive a reboot):
+pump.setSolarMode(SOLAR_OFF);         // or SOLAR_PUMP (no valve) / SOLAR_VALVE
+pump.setSolarMaxPool(30);             // °C; 0 = no limit — no cooling AND no heating cap
 ```
+
+- **`SOLAR_PUMP`** — no valve: solar only switches the filtration pump; the collector is always in the loop.
+- **`SOLAR_VALVE`** — a 3-way valve on P3. Without a valve relay it is stored as `SOLAR_PUMP`.
+- **Valve settle:** after every valve change the pressure checks and baseline learning pause for
+  `APAPUMP_VALVE_SETTLE_SEC` (30 s) — air pushed out of the collector line must not trip a dry-run alarm.
+- **1.2.0 behaviour** (solar is the only driver, the schedule only gives the daily target):
+  `pump.setSolarDrive(SOLAR_WITH_CATCHUP);` — see [Daily runtime](#daily-runtime-target-and-catch-up).
+- **Pump alarm:** while a pump alarm is latched, solar asks for no extra runs at all (after a dry run there
+  is no water to circulate). Your schedule still runs — stop the pump on an alarm in your sketch.
+- **Status:** `isSolarRunning()`, `isSolarValveOpen()`, `isSolarSafetyActive()` (collector above
+  safetyTemp, reported in every mode), `isSolarSensorOk()`.
+
+### Invalid temperatures
+
+A temperature is used only if it is between `APAPUMP_TEMP_MIN_C` (−20) and `APAPUMP_TEMP_MAX_C` (100 °C),
+and not exactly **85.0** (DS18B20 power-on value) or **−1.0** (the "not ready" value of APAPUMP ≤ 1.2.0).
+Return **−127.0f** from a callback while a sensor is not ready. On an invalid collector **or** pool reading,
+solar does nothing at all — no heating, no cooling, no overheat protection — and `isSolarSensorOk()` is
+false (status "Solar sensor fault"). Before 1.3.0 a missing collector sensor (−127) made cooling run
+nonstop, and a missing pool sensor made heating run all day. A pool temperature callback is now required
+for solar.
+
+### Day/night gate — why it exists
+
+`setSolarDayNight()` allows **heating** only between the two hours; cooling is temperature-only, day or
+night. The gate is a **safety net for a collector sensor in the wrong place**: mounted on a pipe near the
+pump room instead of on the absorber (or its outlet), it can read "warmer than the pool" in the evening or
+at night. Solar would then push water through a cold absorber — cooling the pool. Use **wide hours**
+(e.g. 06–21): a dark roof often still gains heat after 20:00. The hours need the RTC on local time.
+
+### Overheat protection
+
+Collector above `safetyTemp` → the pump runs and the valve opens, but **only in `AUTO` and never while a
+pump alarm is latched**. Manual OFF usually means someone is working at the pump; after a dry run there
+is no water to circulate. Pool collectors have their own vent valve. Choose `safetyTemp` above the pool
+temperatures you expect — every overheat run pushes hot water into the pool, even above Max pool.
 
 ### Solar hysteresis
 
@@ -319,6 +369,61 @@ The gap between start and stop thresholds prevents rapid on/off cycling when tem
 
 ---
 
+## Heater (heat pump) on the AUX relay
+
+```cpp
+pump.enableAux(10, 120);              // on 10 s after the pump; pump runs 120 s after it (after-run)
+if (!pump.hasSavedSettings()) pump.setAuxMode(HEATER_SIMPLE);   // first boot only — saved
+```
+
+| `AuxMode` | AUX relay |
+|---|---|
+| `AUX_DISABLED` | never on |
+| `AUX_FOLLOWER` | on/off with the pump, exactly as before 1.3.0 (ozone etc.) — first-boot default of `enableAux()` |
+| `HEATER_SIMPLE` | allowed while the pump runs; the heat pump's own thermostat regulates |
+| `HEATER_FULL` | the library is the thermostat: on below `setHeaterTarget()` − 1.0 °C, off at the target (15–40 °C, default 28) |
+
+In both heater modes the AUX relay is on only while **all** of these hold:
+the pump runs (past the start delay) · no pump alarm (no flow = no heating) · solar is not heating, could
+not heat right now (collector above pool + startDelta, inside the day gate) and the collector is not
+over-hot (solar first) · the permit callback allows it (`setHeaterPermitCallback()`,
+e.g. a cheap-tariff input) · the pool is not above Max pool. `HEATER_FULL` also needs a valid pool
+reading. A 10-minute minimum ON and OFF time (`APAPUMP_HEATER_MIN_ON_SEC` / `_MIN_OFF_SEC`) protects the
+compressor — also after power-up, so the heater waits 10 min after a (re)boot; a pump alarm or a pump stop
+always switches it off at once. The heater never asks for extra
+pump runs — it heats during your filtration schedule. When the heater was already off, the pump stops
+without the after-run. `isHeaterOn()` reports the relay.
+
+In `HEATER_FULL` set the heat pump's own thermostat to its maximum — otherwise the lower of the two settings wins.
+
+> **Relay rule:** the AUX relay switches the heat pump's **remote ON/OFF input** (a few mA) or a **fused
+> contactor coil** with suppression (RC snubber / varistor) — never the compressor or a heating element directly.
+
+---
+
+## Saved settings
+
+The library saves only what an owner or installer changes, so it survives a reboot:
+solar mode, Max pool, AUX/heater mode, heater target, pressure monitoring ON/OFF (plus, as before, the
+daily target, minimum run time and clean-filter pressure). **Constants** — start/stop/cool deltas, safety
+temperature, day gate hours, drive model, timings — are **not** saved: pass them in `setup()` every boot.
+
+`enableSolar()` / `enableAux()` give **first-boot defaults** only; once saved values exist they win. A saved
+mode never activates hardware by itself: solar needs `enableSolar()` and the AUX relay `enableAux()` (or
+`setAuxMode()`) in every boot. To
+apply your own first-boot defaults without overwriting the owner's choice on every boot:
+
+```cpp
+if (!pump.hasSavedSettings()) {       // true after the first boot with this version
+    pump.setSolarMode(SOLAR_OFF);     // e.g. a product shipped with solar off
+}
+```
+
+Saved setters write the EEPROM only after `begin()`. Upgrading from 1.2.0 resets the EEPROM once
+(layout version 2): the clean-filter pressure and daily counters are learned again.
+
+---
+
 ## Daily Runtime Target and Catch-Up
 
 ```cpp
@@ -334,7 +439,9 @@ uint16_t ran = pump.getDailyRuntimeMinutes();
 bool     met = pump.isDailyTargetMet();
 ```
 
-When solar is enabled and the daily target is not met, catch-up runs until the target is reached:
+Catch-up is used only with `setSolarDrive(SOLAR_WITH_CATCHUP)` (the 1.2.0 model, where solar is the only
+driver). It runs as soon as today's runtime is below the target — from midnight, or from the start of the
+catch-up window:
 
 ```cpp
 // Optional: limit catch-up to daytime hours (requires setMidnightCallback)
@@ -422,11 +529,11 @@ Before the baseline is ready, an absolute minimum of 0.1 bar (`APAPUMP_PRESSURE_
 
 ### Pressure sensor optional
 
-Not every installation has a pressure sensor (small garden pools often don't). Register the sensor once with `enablePressure()`, then switch monitoring on or off at any time — e.g. from an installer menu, with the choice stored by your sketch:
+Not every installation has a pressure sensor (small garden pools often don't). Register the sensor once with `enablePressure()`, then switch monitoring on or off at any time — e.g. from an installer menu. Since 1.3.0 the library saves the choice (a saved OFF also wins over the next boot's `enablePressure()`), so call it only when the installer changes it:
 
 ```cpp
 pump.enablePressure([]() { return adc.getPressure(); }, 2.5f);
-pump.setPressureEnabled(settings.pressureOn);   // OFF: no pressure checks at all
+pump.setPressureEnabled(false);   // from the menu — saved; OFF: no pressure checks at all
 ```
 
 With pressure **off** there is **no dry-run, no high-pressure alarm and no filter status** — the pump then has no protection against running dry. Without a sensor, leaving it on is harmless (a sensor that never delivers a valid reading keeps every pressure check inactive), but an explicit OFF also ignores a disconnected input that floats to a plausible value. Switching off clears the last reading and the learned baselines; switching on re-learns them (~80 s of running). The stored clean-filter pressure is kept.
@@ -508,7 +615,8 @@ pump.enableFreezeProtection(
 );
 ```
 
-When pool temperature drops below the threshold, the pump **cycles** to prevent pipes from freezing: runs for `APAPUMP_FREEZE_ON_SEC` (default 5 min), rests for `APAPUMP_FREEZE_OFF_SEC` (default 10 min), and repeats until temperature rises. Both durations are overridable via `build_flags`. **Dry-run interlock:** if the pressure sensor is enabled, calibrated, and indicates no water in the pipes (pressure near zero), freeze protection is suppressed — forcing the pump without water would burn the motor.
+When pool temperature drops below the threshold, the pump **cycles** to prevent pipes from freezing: runs for `APAPUMP_FREEZE_ON_SEC` (default 5 min), rests for `APAPUMP_FREEZE_OFF_SEC` (default 10 min), and repeats until a valid reading reaches threshold + `APAPUMP_FREEZE_HYST_C` (1.0 °C). Readings below 0 °C are valid (before 1.3.0 they were ignored, so protection was off exactly when freezing). An invalid reading (−127, −1.0, 85.0) never ends an active protection — if the sensor is lost while it
+is active, the cycles go on until a valid reading returns (fail-safe in frost). Both durations are overridable via `build_flags`. **Dry-run interlock:** if the pressure sensor is enabled, calibrated, and indicates no water in the pipes (pressure near zero), freeze protection is suppressed — forcing the pump without water would burn the motor.
 
 ---
 
@@ -522,14 +630,8 @@ APAPUMP, APADOSE, and APALCDGUI are independent libraries — your sketch is the
 // In begin(): pass a lambda that reads the timer state from the GUI
 pump.begin(
     []() {
-        // return true when current time falls inside any timer slot
-        uint16_t nowMin = rtcHour * 60 + rtcMinute;
-        for (uint8_t i = 0; i < APA_LCD_MAX_TIMERS; i++) {
-            if (gui.isTimerEnabled(i) &&
-                nowMin >= gui.getTimerStart(i) &&
-                nowMin <  gui.getTimerEnd(i)) return true;
-        }
-        return false;
+        // true inside any timer slot; isTimerActive() also handles slots across midnight
+        return gui.isTimerActive(rtcHour * 60 + rtcMinute);
     },
     nullptr,
     []() { return gui.getTimerTotalMinutes(); }  // daily target from timer sum
@@ -601,7 +703,9 @@ pump.setPumpStateCallback([](bool on) { adc.onPumpState(on); });
 |--------|-------|-------------|
 | `examples/01_minimal/` | Basic | PCF or GPIO, manual override via Serial, all three constructor options |
 | `examples/02_scheduler/` | Intermediate | APALCDGUI timer schedule, UVC + AUX followers, alarm → active alert bridge |
-| `examples/03_solar_freeze/` | Advanced | Solar heater + solar valve, freeze protection, pressure + current safety, filter status, pump stopped on alarm, APADOSE post-shock bridge |
+| `examples/03_solar_freeze/` | Advanced | Solar + valve, heat pump (HEATER_SIMPLE), freeze protection, pressure + current safety, filter status, pump stopped on alarm, APADOSE post-shock bridge |
+| `examples/04_hardware_test/` | Bench | Interactive relay/sensor test on the APA HMI board (LCD menu) — uses 93 % of an Uno's flash |
+| `examples/05_solar_heater/` | Intermediate | Schedule + solar + heat pump in a few lines; first-boot defaults with `hasSavedSettings()` |
 
 ---
 
@@ -611,19 +715,21 @@ Compiled with the `01_minimal` example. Zero errors, zero library warnings on al
 
 | Platform | Board | RAM used | RAM total | Flash used | Flash total |
 |----------|-------|----------|-----------|------------|-------------|
-| Arduino Mega 2560 | ATmega2560 | 564 B | 8 192 B (6.9%) | 11 952 B | 253 952 B (4.7%) |
-| Arduino Uno | ATmega328P | 564 B | 2 048 B (27.5%) | 11 186 B | 32 256 B (34.7%) |
-| ESP32 DevKit | ESP32 | 22 024 B | 327 680 B (6.7%) | 290 709 B | 1 310 720 B (22.2%) |
-| ESP8266 D1 Mini | ESP8266 | 28 852 B | 81 920 B (35.2%) | 274 271 B | 1 044 464 B (26.3%) |
-| STM32 Bluepill | STM32F103C8 | 2 628 B | 20 480 B (12.8%) | 26 068 B | 65 536 B (39.8%) |
+| Arduino Mega 2560 | ATmega2560 | 577 B | 8 192 B (7.0%) | 13 420 B | 253 952 B (5.3%) |
+| Arduino Uno | ATmega328P | 577 B | 2 048 B (28.2%) | 12 658 B | 32 256 B (39.2%) |
+| ESP32 DevKit | ESP32 | 22 040 B | 327 680 B (6.7%) | 292 113 B | 1 310 720 B (22.3%) |
+| ESP8266 D1 Mini | ESP8266 | 28 868 B | 81 920 B (35.2%) | 275 539 B | 1 044 464 B (26.4%) |
+| STM32 Bluepill | STM32F103C8 | 2 644 B | 20 480 B (12.9%) | 27 096 B | 65 536 B (41.3%) |
 
-> The Uno row uses 27.5% RAM — that is the library with all Phase 2 features **registered** in the example. A minimal sketch (no solar, no pressure, no freeze) sits below 20%. ESP32 and ESP8266 totals include the full Arduino framework regardless of use.
+All five examples build on all five platforms (1.3.0). Against 1.2.0: +13–16 B RAM, about +1.5 KB flash.
+
+> The Uno row uses 28.2% RAM — that is the library with all Phase 2 features **registered** in the example. A minimal sketch (no solar, no pressure, no freeze) sits below 20%. ESP32 and ESP8266 totals include the full Arduino framework regardless of use.
 
 ---
 
 ## EEPROM Layout
 
-APAPUMP reserves **12 bytes** starting at `APAPUMP_EEPROM_ADDR` (default 520).
+APAPUMP reserves **15 bytes** starting at `APAPUMP_EEPROM_ADDR` (default 520) — layout version 2 since 1.3.0 (12 bytes before).
 
 ### Field map
 
@@ -635,11 +741,14 @@ APAPUMP reserves **12 bytes** starting at `APAPUMP_EEPROM_ADDR` (default 520).
 | 525 | 2 | Yesterday's runtime (minutes) | Midnight rollover (once per day) |
 | 527 | 2 | Minimum run time (seconds) | `setMinRunTime()` |
 | 529 | 2 | Clean pressure × 100 (bar; 0 = not learned) | automatic first learn, `learnCleanPressure()`, `setCleanPressure()` |
-| 531 | 1 | Checksum (byte sum of bytes 520–530) | — corruption guard |
+| 531 | 1 | Settings: bit 0 pressure ON, bits 1–2 `SolarMode`, bits 3–4 `AuxMode` | `setPressureEnabled()`, `setSolarMode()`, `setAuxMode()` |
+| 532 | 1 | Max pool (°C, 0 = no limit) | `setSolarMaxPool()` |
+| 533 | 1 | Heater target (°C) | `setHeaterTarget()` |
+| 534 | 1 | Checksum (byte sum of bytes 520–533) | — corruption guard |
 
 ### Write protection and EEPROM lifespan
 
-`_saveEEPROM()` writes the full 12-byte struct, but a physical write only occurs when a byte has actually changed:
+`_saveEEPROM()` writes the full 15-byte struct, but a physical write only occurs when a byte has actually changed:
 
 - **AVR (Uno/Mega):** `EEPROM.put()` calls `EEPROM.update()` per byte — reads first, writes only if value differs.
 - **ESP32/ESP8266:** `EEPROM.put()` updates a RAM buffer; `EEPROM.commit()` compares the buffer to flash before writing — no flash write if content unchanged.
@@ -660,7 +769,7 @@ APAPUMP reserves **12 bytes** starting at `APAPUMP_EEPROM_ADDR` (default 520).
 
 ```ini
 ; platformio.ini — build_flags reach both your sketch and the library's own .cpp
-build_flags = -DAPAPUMP_EEPROM_ADDR=532
+build_flags = -DAPAPUMP_EEPROM_ADDR=535
 ```
 
 ### APA EEPROM address map
@@ -678,8 +787,8 @@ All ranges across the APA library suite — free blocks shown explicitly:
 | 500–501 | 2 | used | APALCDGUI brightness |
 | 502–508 | 7 | used | APALCDGUI timer slots (default 3 slots) |
 | 509–519 | 11 | **free** | — gap before APAPUMP ¹ |
-| **520–531** | **12** | **used** | **APAPUMP** |
-| 532–581 | 50 | **free** | — APAPUMP expansion reserve |
+| **520–534** | **15** | **used** | **APAPUMP** (12 bytes before 1.3.0) |
+| 535–581 | 47 | **free** | — APAPUMP expansion reserve |
 | 582–587 | 6 | used | APASENSE (pressure zero) |
 | 588– | — | **free** | — |
 

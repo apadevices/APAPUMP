@@ -1,7 +1,8 @@
 // APAPUMP — 03_solar_freeze  (advanced)
 //
 // Full APA pool automation system:
-//   • Solar heater with valve (absorber → pool temperature control)
+//   • Solar heater with valve (absorber → pool temperature control), extra runs on top of the schedule
+//   • Heat pump on the AUX relay (HEATER_SIMPLE: solar first, its own thermostat regulates)
 //   • Freeze protection with dry-run interlock
 //   • Pressure monitoring: dry-run + overpressure alarms, filter status (backwash reminder)
 //   • Current monitoring: overcurrent alarm (direct-drive pumps only — see README)
@@ -20,11 +21,12 @@
 #include <APAPUMP.h>
 
 // ---- Placeholder sensor functions -------------------------------------------
-// Replace these with your APASENSE calls once that library is available.
-// Each returns -1.0f until the sensor is calibrated — APAPUMP skips that feature.
+// Replace these with your sensor calls. Temperatures return -127.0f (DS18B20 "no sensor")
+// until valid — APAPUMP never uses an invalid temperature (-20..100 °C, not 85.0, not -1.0).
+// Pressure/current return -1.0f until calibrated — APAPUMP skips that feature.
 
-float getSolarTemp()  { return -1.0f; }   // absorber temperature (°C)
-float getPoolTemp()   { return -1.0f; }   // pool / freeze sensor (°C)
+float getSolarTemp()  { return -127.0f; } // absorber temperature (°C)
+float getPoolTemp()   { return -127.0f; } // pool / freeze sensor (°C)
 float getPressure()   { return -1.0f; }   // pipe pressure (bar)   — -1 = not calibrated
 float getCurrent()    { return -1.0f; }   // pump current (A)      — -1 = not ready
 
@@ -100,9 +102,16 @@ void setup() {
 
     // ---- Follower devices ---------------------------------------------------
     pump.enableUVC(5, 30);    // UVC: 5 s pre-delay, 30 s post-delay
-    pump.enableAux(10, 30);   // AUX heat pump: on after 10 s, off 30 s before pump stops
+    pump.enableAux(10, 120);  // AUX: on 10 s after the pump, pump runs 120 s after it (heat-pump after-run)
+    // The relay switches the heat pump's remote ON/OFF input (or a fused contactor coil) —
+    // never the compressor itself. HEATER_SIMPLE: the heat pump's own thermostat regulates,
+    // APAPUMP adds solar first, no heating during a pump alarm, 10 min min ON/OFF.
+    // First boot only — the owner's later choice is saved and survives a reboot.
+    if (!pump.hasSavedSettings()) pump.setAuxMode(HEATER_SIMPLE);
 
     // ---- Solar heater with valve --------------------------------------------
+    // The schedule keeps driving the pump; solar heating/cooling are extra runs.
+    // Overheat protection (safetyTemp) runs the pump only in AUTO, never on a pump alarm.
     pump.enableSolar(
         getSolarTemp,          // absorber temperature callback
         getPoolTemp,           // pool temperature callback
@@ -111,11 +120,15 @@ void setup() {
         3.0f,                  // stopDelta:  stop  when absorber < pool + 3°C
         32.0f,                 // maxPoolTemp: cool pool if pool > 32°C
         2.0f,                  // coolDelta: cool when absorber < pool - 2°C
-        50.0f                  // safetyTemp: force on if absorber > 50°C (Priority 0)
+        60.0f                  // safetyTemp: overheat protection above 60°C (AUTO only)
     );
+    // useValve and maxPoolTemp are first-boot defaults. Later changes (e.g. from a menu):
+    // pump.setSolarMode(SOLAR_OFF / SOLAR_PUMP / SOLAR_VALVE); pump.setSolarMaxPool(30);
 
-    // Restrict solar heating to daytime (07:00–20:00)
-    // pump.setSolarDayNight([]() { return rtc.getEpoch(); }, 7, 20);
+    // Heating only 06:00–21:00. A safety net for a collector sensor placed in a pipe near
+    // the pump room: it can read "warm" at night and the pump would then cool the pool.
+    // Cooling (pool > maxPoolTemp) stays temperature-based, day or night.
+    // pump.setSolarDayNight([]() { return RTClib::now().unixtime(); }, 6, 21);
 
     // ---- Current monitoring -------------------------------------------------
     // Learns the pump's own normal current; no rating to enter. Below 0.5 A it stays
@@ -139,15 +152,16 @@ void setup() {
     });
 
     // ---- Freeze protection --------------------------------------------------
-    // Uses pool temperature sensor (same as solar).
+    // Uses pool temperature sensor (same as solar). Works below 0 °C; a missing reading
+    // never ends an active freeze protection (it ends at threshold + 1 °C).
     // Dry-run interlock: if pressure EMA confirms no water, freeze pump is suppressed.
     pump.enableFreezeProtection(getPoolTemp);     // threshold = 4.5°C (default)
 
-    // ---- Catch-up window ----------------------------------------------------
-    // Keep pump running to make up missed daily target, but only 08:00–20:00.
-    pump.setDailyTarget(360);                     // 6-hour daily target
-    // pump.setCatchupWindow(8, 20);              // uncomment when RTC is wired
-    // pump.setMidnightCallback([]() { return rtc.getEpoch(); });
+    // ---- Daily runtime ------------------------------------------------------
+    pump.setDailyTarget(360);                     // 6-hour daily target (runtime counter)
+    // pump.setMidnightCallback([]() { return RTClib::now().unixtime(); });  // real midnight
+    // 1.2.0 style (solar is the only driver + catch-up 08:00–20:00) instead of the schedule:
+    // pump.setSolarDrive(SOLAR_WITH_CATCHUP); pump.setCatchupWindow(8, 20);
 
     // ---- Manual override config --------------------------------------------
     pump.setManualTimeout(120);                   // auto-return after 2 hours
@@ -193,6 +207,11 @@ void loop() {
         Serial.print(F(" min"));
         if (pump.isDailyTargetMet()) Serial.print(F(" [TARGET MET]"));
         if (pump.isFreezeActive())   Serial.print(F(" [FREEZE]"));
+        if (pump.isSolarRunning())   Serial.print(F(" [SOLAR]"));
+        if (pump.isSolarValveOpen()) Serial.print(F(" [VALVE]"));
+        if (pump.isSolarSafetyActive()) Serial.print(F(" [HOT]"));
+        if (!pump.isSolarSensorOk()) Serial.print(F(" [SOLAR SENSOR]"));
+        if (pump.isHeaterOn())       Serial.print(F(" [HEATER]"));
         if (pump.getAlarm() != PUMP_ALARM_NONE) {
             Serial.print(F("  ALARM: "));
             Serial.print(pump.getAlarm());

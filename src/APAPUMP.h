@@ -27,9 +27,9 @@
 #include <Wire.h>
 
 // ---- Version ----------------------------------------------------------------
-#define APAPUMP_VERSION "1.2.0"
+#define APAPUMP_VERSION "1.3.0"
 
-// ---- EEPROM base address (12 bytes: 520–531) --------------------------------
+// ---- EEPROM base address (15 bytes: 520–534) --------------------------------
 // APA library address map — do not overlap these ranges:
 //
 //   0 –127   free  (128 bytes)
@@ -41,8 +41,8 @@
 //   500–501  APALCDGUI brightness    2 bytes
 //   502–508  APALCDGUI timers        7 bytes  [default 3 slots; up to 13 B with MAX_TIMERS=6 → ends 514]
 //   509–519  free  (11 bytes min, 5 bytes min when MAX_TIMERS=6)
-//   520–531  APAPUMP                12 bytes  ← this library
-//   532–581  free  (APAPUMP expansion reserve)
+//   520–534  APAPUMP                15 bytes  ← this library (12 bytes before 1.3.0)
+//   535–581  free  (APAPUMP expansion reserve)
 //   582–587  APASENSE                6 bytes
 //   588–    free
 //
@@ -86,6 +86,35 @@ constexpr float    APAPUMP_PRESSURE_ABS_MIN    = 0.1f; // min pressure (bar) of 
 #ifndef APAPUMP_FILTER_BACKWASH_DELTA
 #define APAPUMP_FILTER_BACKWASH_DELTA  0.8f   // FILTER_BACKWASH_NEEDED at clean + 0.8 bar
 #endif
+// Temperature readings outside this range, exactly 85.0 (DS18B20 power-on value) or exactly
+// -1.0 (the "not ready" value of APAPUMP <= 1.2.0) are invalid and never used for control.
+#ifndef APAPUMP_TEMP_MIN_C
+#define APAPUMP_TEMP_MIN_C            -20.0f
+#endif
+#ifndef APAPUMP_TEMP_MAX_C
+#define APAPUMP_TEMP_MAX_C            100.0f
+#endif
+#ifndef APAPUMP_FREEZE_HYST_C
+#define APAPUMP_FREEZE_HYST_C          1.0f   // freeze protection ends at threshold + 1.0 °C
+#endif
+#ifndef APAPUMP_VALVE_SETTLE_SEC
+#define APAPUMP_VALVE_SETTLE_SEC       APAPUMP_CURRENT_SETTLE_SEC  // no pressure checks/learning after a valve change
+#endif
+// Heater (AUX in HEATER_SIMPLE / HEATER_FULL)
+#ifndef APAPUMP_HEATER_HYST_C
+#define APAPUMP_HEATER_HYST_C          1.0f   // FULL: on below target - 1.0 °C, off at target
+#endif
+#ifndef APAPUMP_HEATER_MIN_ON_SEC
+#define APAPUMP_HEATER_MIN_ON_SEC      600    // heat-pump short-cycling guard
+#endif
+#ifndef APAPUMP_HEATER_MIN_OFF_SEC
+#define APAPUMP_HEATER_MIN_OFF_SEC     600
+#endif
+#ifndef APAPUMP_HEATER_TARGET_DEFAULT
+#define APAPUMP_HEATER_TARGET_DEFAULT  28     // °C, first-boot heater target
+#endif
+constexpr uint8_t  APAPUMP_HEATER_TARGET_MIN  = 15;    // setHeaterTarget() range (°C)
+constexpr uint8_t  APAPUMP_HEATER_TARGET_MAX  = 40;
 
 // ---- Enums ------------------------------------------------------------------
 
@@ -103,6 +132,20 @@ enum PumpState    : uint8_t { IDLE, STARTING, RUNNING, STOPPING };
 
 /** Solar valve operating mode. */
 enum ValveMode    : uint8_t { VALVE_SUSTAINED, VALVE_PULSE };
+
+/** Solar mode (saved). SOLAR_PUMP: no valve — solar only switches the filtration pump
+ *  (collector always in the loop). SOLAR_VALVE: 3-way valve on the valve relay (P3). */
+enum SolarMode    : uint8_t { SOLAR_OFF, SOLAR_PUMP, SOLAR_VALVE };
+
+/** How solar and the schedule share the pump (not saved — set in setup()).
+ *  SOLAR_WITH_SCHEDULE (default): the schedule drives the pump; solar heating/cooling are extra runs.
+ *  SOLAR_WITH_CATCHUP: solar is the only driver, the schedule gives the daily target (1.2.0 behaviour). */
+enum SolarDrive   : uint8_t { SOLAR_WITH_SCHEDULE, SOLAR_WITH_CATCHUP };
+
+/** AUX relay mode (saved). AUX_FOLLOWER: on/off with the pump (1.2.0 behaviour — ozone etc.).
+ *  HEATER_SIMPLE: follower + solar first + heater rules; the heat pump regulates itself.
+ *  HEATER_FULL: HEATER_SIMPLE + thermostat on the pool temperature (setHeaterTarget()). */
+enum AuxMode      : uint8_t { AUX_DISABLED, AUX_FOLLOWER, HEATER_SIMPLE, HEATER_FULL };
 
 /** Filter status: rise of the running pressure above the clean-filter pressure.
  *  UNKNOWN until a clean pressure and a pressure baseline exist (see getFilterStatus()). */
@@ -181,8 +224,8 @@ public:
     // ---- Manual mode --------------------------------------------------------
 
     /** Set manual override mode.
-     *  FORCE_ON/FORCE_OFF suspend all guards and the priority engine.
-     *  Solar safety override (absorber > safetyTemp) still applies even in FORCE_OFF. */
+     *  FORCE_ON/FORCE_OFF suspend all guards and the priority engine. Solar overheat
+     *  protection runs only in AUTO (since 1.3.0; before it also overrode FORCE_OFF). */
     void       setManualMode(ManualMode m);
     ManualMode getManualMode() const;
 
@@ -237,18 +280,21 @@ public:
     void enableUVC(uint16_t preDelayS = 5, uint16_t postDelayS = 30);
 
     /** AUX device relay (PCF P2 or DIRECT pin c — heat pump, ozone, etc.):
-     *  ON startDelayS after pump starts, OFF stopLeadS before pump stops. */
+     *  ON startDelayS after pump starts, OFF stopLeadS before pump stops (= after-run).
+     *  First-boot mode AUX_FOLLOWER; see setAuxMode() for the heater modes. */
     void enableAux(uint16_t startDelayS = 10, uint16_t stopLeadS = 30);
 
     // ---- Optional solar heater ----------------------------------------------
 
-    /** Enable solar heating control.
-     *  When enabled, solar logic is the sole pump on/off driver.
-     *  scheduleCb (from begin()) is used only for daily target — not for on/off.
+    /** Register solar heating: sensors and constants (call every boot).
+     *  Default drive SOLAR_WITH_SCHEDULE: the schedule keeps driving the pump and solar
+     *  heating/cooling are extra runs (setSolarDrive(SOLAR_WITH_CATCHUP) = 1.2.0 behaviour).
      *  Dead band: pump starts when absorber > pool + startDelta,
      *             stops when absorber < pool + stopDelta (startDelta - stopDelta = hysteresis window).
-     *  Solar safety (Priority 0): absorber > safetyTemp forces pump ON + valve OPEN
-     *  regardless of ManualMode. Auto-clears when absorber cools. */
+     *  Overheat protection: absorber > safetyTemp starts the pump and opens the valve — only in
+     *  AUTO and never on a latched pump alarm. Invalid temperatures stop all solar logic.
+     *  useValve / maxPoolTemp are first-boot defaults; saved setSolarMode() / setSolarMaxPool()
+     *  values win once they exist. */
     void enableSolar(
         float    (*solarTempCb)(),
         float    (*poolTempCb)()    = nullptr,
@@ -266,6 +312,52 @@ public:
     void setSolarDayNight(uint32_t (*epochCb)(),
                           uint8_t  dayStartHour   = 7,
                           uint8_t  nightStartHour = 20);
+
+    /** Solar mode (saved). Call enableSolar() first — it registers the sensors and constants.
+     *  SOLAR_OFF: no solar logic, no overheat protection, valve closed.
+     *  SOLAR_VALVE without a valve relay is stored as SOLAR_PUMP. */
+    void      setSolarMode(SolarMode m);
+    SolarMode getSolarMode() const;
+
+    /** Max pool temperature in whole °C (saved). 0 = no limit: no cooling AND no heating cap.
+     *  enableSolar()'s maxPoolTemp is only the first-boot default. */
+    void    setSolarMaxPool(uint8_t celsius);
+    uint8_t getSolarMaxPool() const;
+
+    /** Default SOLAR_WITH_SCHEDULE (see SolarDrive). Not saved. */
+    void setSolarDrive(SolarDrive d);
+
+    bool isSolarRunning() const;       // solar heating or cooling is commanding the pump
+    bool isSolarSafetyActive() const;  // collector above safetyTemp (reported in every mode)
+    bool isSolarValveOpen() const;     // valve relay commanded open
+    bool isSolarSensorOk() const;      // false while solar is on and the collector or pool reading is invalid
+
+    // ---- Pool temperature (shared) ------------------------------------------
+
+    /** Pool temperature in °C for solar and HEATER_FULL. enableSolar()'s poolTempCb sets the same
+     *  callback. Return -127.0f (or any invalid value) while the sensor is not ready. */
+    void setPoolTempCallback(float (*cb)());
+
+    // ---- Heater on the AUX relay --------------------------------------------
+
+    /** AUX mode (saved). enableAux() sets the timing and gives first-boot default AUX_FOLLOWER. */
+    void    setAuxMode(AuxMode m);
+    AuxMode getAuxMode() const;
+
+    /** HEATER_FULL target in whole °C, APAPUMP_HEATER_TARGET_MIN..MAX (saved). */
+    void    setHeaterTarget(uint8_t celsius);
+    uint8_t getHeaterTarget() const;
+
+    /** Heater allowed only while cb returns true (e.g. a cheap-tariff input). nullptr = always. */
+    void setHeaterPermitCallback(bool (*cb)());
+
+    bool isHeaterOn() const;           // AUX relay on in a heater mode
+
+    // ---- Saved settings -----------------------------------------------------
+
+    /** true if valid saved settings were loaded by begin(). Lets a sketch apply its own
+     *  first-boot defaults without overwriting the owner's choices on every boot. */
+    bool hasSavedSettings() const;
 
     // ---- Optional current monitoring (overcurrent protection) ---------------
 
@@ -297,7 +389,8 @@ public:
      *  setting for installations without a pressure sensor. OFF: no dry-run, high-pressure
      *  or filter-status checks from the next update() on; the last reading and both learned
      *  baselines are cleared (they are re-learned after ON). The stored clean-filter pressure
-     *  is kept. An alarm already raised stays until acknowledgeAlarm(). Default: ON. */
+     *  is kept. An alarm already raised stays until acknowledgeAlarm(). Default: ON.
+     *  Saved (since 1.3.0): a saved OFF also wins over a later enablePressure(). */
     void  setPressureEnabled(bool on);
     bool  isPressureEnabled() const;   // false before enablePressure() or after setPressureEnabled(false)
 
@@ -348,7 +441,9 @@ public:
      *  Cycle: APAPUMP_FREEZE_ON_SEC on, APAPUMP_FREEZE_OFF_SEC rest (default 5 min / 10 min).
      *  Dry-run interlock: if pressure is enabled and calibrated and EMA shows no flow,
      *  freeze protection is suppressed (pipes drained — forcing pump on would damage motor).
-     *  tempCb returns °C; return -1.0f when sensor not ready (protection stays inactive). */
+     *  tempCb returns °C; return -127.0f (or -1.0f) when the sensor is not ready. Readings below
+     *  0 °C are valid. An invalid reading never ends an active protection — it ends only on a
+     *  valid reading >= thresholdC + APAPUMP_FREEZE_HYST_C. */
     void enableFreezeProtection(float (*tempCb)(),
                                 float thresholdC = APAPUMP_FREEZE_THRESHOLD_C);
 
@@ -376,7 +471,7 @@ private:
     uint8_t _pcfAddr;     // PCF 7-bit I2C address (PCF mode only)
     uint8_t _pcfState;    // current PCF byte: HIGH bit = relay ON; 0x00 = all OFF
 
-    // ---- Packed flags (3 bytes) ---------------------------------------------
+    // ---- Packed flags (4 bytes) ---------------------------------------------
     struct {
         // byte 1
         uint8_t ready             : 1;  // true after begin()
@@ -405,6 +500,13 @@ private:
         uint8_t pressurePeakEnabled : 1;  // overpressure alarm armed
         uint8_t flowEnabled         : 1;  // flow switch callback registered
         uint8_t catchupWindow       : 1;  // catch-up restricted to a time window
+        // byte 4
+        uint8_t solarMode           : 2;  // SolarMode
+        uint8_t auxMode             : 2;  // AuxMode
+        uint8_t solarDrive          : 1;  // SolarDrive
+        uint8_t savedSettings       : 1;  // valid saved settings loaded at begin()
+        uint8_t solarSensorFault    : 1;  // collector or pool reading invalid while solar is on
+        uint8_t solarHeating        : 1;  // solarRunning because of heating (not cooling)
     } _flags;
 
     uint8_t  _relayBits;     // DIRECT mode: bit mask tracking relay states (bit 0–3 = pump/uvc/aux/valve)
@@ -485,6 +587,13 @@ private:
     float  (*_freezeTempCb)();        // pool/pipe temperature callback (°C; -1.0f = not ready)
     float    _freezeThresholdC;       // freeze protection activates below this temperature
 
+    // ---- Heater / valve -----------------------------------------------------
+    bool   (*_heaterPermitCb)();      // heater allowed while true (nullptr = always)
+    uint8_t  _heaterTargetC;          // HEATER_FULL target (°C)
+    bool     _pressureUserOff;        // saved setPressureEnabled(false); survives enablePressure()
+    uint32_t _auxChangeMs;            // last heater on/off change (min ON/OFF guard)
+    uint32_t _valveChangeMs;          // last valve change (pressure settle)
+
     // ---- Flow switch (stub) -------------------------------------------------
     bool   (*_flowCb)();              // returns true when flow is confirmed
 
@@ -492,7 +601,7 @@ private:
     uint8_t _catchupStartHour;        // catch-up allowed from this hour (inclusive)
     uint8_t _catchupEndHour;          // catch-up allowed until this hour (exclusive)
 
-    // ---- EEPROM layout (12 bytes at APAPUMP_EEPROM_ADDR) --------------------
+    // ---- EEPROM layout (15 bytes at APAPUMP_EEPROM_ADDR) --------------------
     struct __attribute__((packed)) EepromData {
         uint16_t magic;                // 0xA55A
         uint8_t  version;              // config version — mismatch resets to defaults
@@ -500,10 +609,13 @@ private:
         uint16_t yesterdayRuntimeMin;
         uint16_t minRunTimeSec;
         uint16_t cleanPressure100;     // bar × 100; 0 = not learned
+        uint8_t  settings;             // b0 pressure ON, b1-2 SolarMode, b3-4 AuxMode
+        uint8_t  solarMaxPoolC;        // 0 = no limit
+        uint8_t  heaterTargetC;
         uint8_t  checksum;             // byte sum of preceding fields
     };
     static constexpr uint16_t EEPROM_MAGIC   = 0xA55A;
-    static constexpr uint8_t  EEPROM_VERSION = 1;
+    static constexpr uint8_t  EEPROM_VERSION = 2;   // 2 = 1.3.0 (solar/heater/pressure settings)
 
     // ---- Private methods ----------------------------------------------------
     void _writePcf();
@@ -513,6 +625,12 @@ private:
     void _stopPumpSequence(uint32_t now);
     bool _shouldPumpRun();
     bool _solarWantsRun();
+    bool _solarActive() const;                 // enableSolar() called, mode not OFF
+    bool _solarDaytime() const;                // inside setSolarDayNight() hours (true if none)
+    void _setValve(bool open, uint32_t now);   // stamps _valveChangeMs on a real change
+    bool _heaterMode() const;                  // HEATER_SIMPLE or HEATER_FULL
+    bool _heaterWanted(uint32_t now) const;    // heater rules incl. min ON/OFF guard
+    static bool _tempValid(float t);
     void _updateFollowers(uint32_t now);
     void _updateDailyCounter(uint32_t now);
     void _updateCurrentEma();

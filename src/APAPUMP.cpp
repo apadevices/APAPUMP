@@ -55,6 +55,9 @@ ApaPump::ApaPump()
     _freezeTempCb      = nullptr; _freezeThresholdC   = APAPUMP_FREEZE_THRESHOLD_C;
     _flowCb            = nullptr;
     _catchupStartHour  = 0;   _catchupEndHour      = 0;
+    _heaterPermitCb    = nullptr; _heaterTargetC      = APAPUMP_HEATER_TARGET_DEFAULT;
+    _auxChangeMs       = 0;   _valveChangeMs       = 0;
+    _pressureUserOff   = false;
 }
 
 ApaPump::ApaPump(RelayDriver mode, uint8_t a,
@@ -105,6 +108,107 @@ ApaPump::ApaPump(RelayDriver mode, uint8_t a,
     _freezeTempCb      = nullptr; _freezeThresholdC   = APAPUMP_FREEZE_THRESHOLD_C;
     _flowCb            = nullptr;
     _catchupStartHour  = 0;   _catchupEndHour      = 0;
+    _heaterPermitCb    = nullptr; _heaterTargetC      = APAPUMP_HEATER_TARGET_DEFAULT;
+    _auxChangeMs       = 0;   _valveChangeMs       = 0;
+    _pressureUserOff   = false;
+}
+
+// ============================================================================
+// Solar / heater / saved-settings API (1.3.0). Setters of saved values write the
+// EEPROM only after begin() (compare-before-write: unchanged bytes are not rewritten).
+// ============================================================================
+
+void ApaPump::setSolarMode(SolarMode m) {
+    if (m == SOLAR_VALVE && !_flags.solarValveEnabled) m = SOLAR_PUMP;   // no valve relay wired
+    _flags.solarMode = m;
+    if (m == SOLAR_OFF) { _flags.solarRunning = 0; _flags.solarHeating = 0; }
+    if (_flags.ready) _saveEEPROM();
+}
+SolarMode ApaPump::getSolarMode() const           { return (SolarMode)_flags.solarMode; }
+void ApaPump::setSolarMaxPool(uint8_t celsius) {
+    _solarMaxPoolTemp = celsius;
+    if (_flags.ready) _saveEEPROM();
+}
+uint8_t ApaPump::getSolarMaxPool() const          { return (uint8_t)_solarMaxPoolTemp; }
+void ApaPump::setSolarDrive(SolarDrive d)         { _flags.solarDrive = d; }
+bool ApaPump::isSolarRunning() const              { return _flags.solarRunning; }
+bool ApaPump::isSolarSafetyActive() const         { return _flags.solarSafetyActive; }
+bool ApaPump::isSolarValveOpen() const            { return _flags.solarValveEnabled && _isRelayOn(3); }
+bool ApaPump::isSolarSensorOk() const             { return !_flags.solarSensorFault; }
+void ApaPump::setPoolTempCallback(float (*cb)())  { _poolTempCb = cb; }
+void ApaPump::setAuxMode(AuxMode m) {
+    if (m == AUX_DISABLED && _flags.auxRunning && _id[2] != 0xFF) {   // switch it off now
+        _setRelay(2, false);
+        _flags.auxRunning = 0;
+        _auxChangeMs      = millis();
+    }
+    _flags.auxMode    = m;
+    _flags.auxEnabled = (m != AUX_DISABLED && _id[2] != 0xFF);
+    if (_flags.ready) _saveEEPROM();
+}
+AuxMode ApaPump::getAuxMode() const               { return (AuxMode)_flags.auxMode; }
+void ApaPump::setHeaterTarget(uint8_t celsius) {
+    _heaterTargetC = constrain(celsius, APAPUMP_HEATER_TARGET_MIN, APAPUMP_HEATER_TARGET_MAX);
+    if (_flags.ready) _saveEEPROM();
+}
+uint8_t ApaPump::getHeaterTarget() const          { return _heaterTargetC; }
+void ApaPump::setHeaterPermitCallback(bool (*cb)()) { _heaterPermitCb = cb; }
+bool ApaPump::isHeaterOn() const                  { return _heaterMode() && _flags.auxRunning; }
+bool ApaPump::hasSavedSettings() const            { return _flags.savedSettings; }
+
+bool ApaPump::_solarActive() const {
+    return _flags.solarEnabled && _flags.solarMode != SOLAR_OFF && _solarTempCb;
+}
+
+void ApaPump::_setValve(bool open, uint32_t now) {
+    if (!_flags.solarValveEnabled || _isRelayOn(3) == open) return;
+    _setRelay(3, open);
+    _valveChangeMs = now;   // pressure checks and learning pause for APAPUMP_VALVE_SETTLE_SEC
+}
+
+bool ApaPump::_heaterMode() const {
+    return _flags.auxMode == HEATER_SIMPLE || _flags.auxMode == HEATER_FULL;
+}
+
+// Heater rules (pump running past the AUX start delay is checked by the caller).
+bool ApaPump::_heaterWanted(uint32_t now) const {
+    if (_flags.alarmActive) return false;   // no flow = no heating, beats the min-ON guard
+
+    float pool  = _poolTempCb ? _poolTempCb() : -127.0f;
+    bool  valid = _tempValid(pool);
+
+    // Solar first: not only while solar heats, but also while it CAN heat right now -- the
+    // solar flags are cleared e.g. during an alarm, and the heater is checked before solar
+    // re-evaluates, so a latched flag alone would start the heat pump for its min-ON time.
+    bool solarHeats = (_flags.solarRunning && _flags.solarHeating) || _flags.solarSafetyActive;
+    if (!solarHeats && valid && _solarActive() && _solarDaytime()) {
+        float absorber = _solarTempCb();
+        solarHeats = _tempValid(absorber) && absorber > pool + _solarStartDelta;
+    }
+    bool want = !solarHeats;
+    if (want && _heaterPermitCb) want = _heaterPermitCb();
+    if (want && valid && _solarMaxPoolTemp > 0.0f && pool > _solarMaxPoolTemp) want = false;
+    if (want && _flags.auxMode == HEATER_FULL) {
+        if (!valid) want = false;
+        else want = _flags.auxRunning ? (pool < _heaterTargetC)
+                                      : (pool < _heaterTargetC - APAPUMP_HEATER_HYST_C);
+    }
+
+    // Short-cycling guard for the heat pump's compressor
+    uint32_t since = now - _auxChangeMs;
+    if ( _flags.auxRunning && !want && since < (uint32_t)APAPUMP_HEATER_MIN_ON_SEC  * 1000UL) return true;
+    if (!_flags.auxRunning &&  want && since < (uint32_t)APAPUMP_HEATER_MIN_OFF_SEC * 1000UL) return false;
+    return want;
+}
+
+bool ApaPump::_solarDaytime() const {
+    if (!_flags.solarDayNight || !_solarEpochCb) return true;
+    uint8_t hour = (uint8_t)((_solarEpochCb() % 86400UL) / 3600UL);
+    return hour >= _solarDayStartHour && hour < _solarNightStartHour;
+}
+
+bool ApaPump::_tempValid(float t) {
+    return t >= APAPUMP_TEMP_MIN_C && t <= APAPUMP_TEMP_MAX_C && t != 85.0f && t != -1.0f;
 }
 
 // ============================================================================
@@ -172,7 +276,8 @@ void ApaPump::update() {
 
     // ---- Safety alarm checks (after inrush settle, pump running) -----------
     if (_pumpState == RUNNING && !_flags.alarmActive &&
-        (now - _pumpStartMs) >= (uint32_t)APAPUMP_CURRENT_SETTLE_SEC * 1000UL) {
+        (now - _pumpStartMs)   >= (uint32_t)APAPUMP_CURRENT_SETTLE_SEC * 1000UL &&
+        (now - _valveChangeMs) >= (uint32_t)APAPUMP_VALVE_SETTLE_SEC * 1000UL) {
 
         // Dry-run: pressure too low for a running pump
         if (_flags.pressureEnabled && _lastPressure >= 0.0f) {
@@ -226,30 +331,41 @@ void ApaPump::update() {
     // or an overcurrent must not become the new "normal" -- not even the one sample
     // that raised the alarm (before 1.1.1 that sample was learned first).
     if (_pumpState == RUNNING && !_flags.alarmActive &&
-        (now - _pumpStartMs) >= (uint32_t)APAPUMP_CURRENT_SETTLE_SEC * 1000UL &&
-        (now - _lastEmaMs)   >= APAPUMP_CURRENT_SAMPLE_MS) {
+        (now - _pumpStartMs)   >= (uint32_t)APAPUMP_CURRENT_SETTLE_SEC * 1000UL &&
+        (now - _valveChangeMs) >= (uint32_t)APAPUMP_VALVE_SETTLE_SEC * 1000UL &&
+        (now - _lastEmaMs)     >= APAPUMP_CURRENT_SAMPLE_MS) {
         _lastEmaMs = now;
         _updateCurrentEma();
         if (!_flags.alarmActive) _updatePressureEma();   // an overcurrent just raised -> skip
     }
 
-    // ---- Solar safety override (Priority 0) --------------------------------
-    // Applies only when solar is enabled. Beats FORCE_OFF — absorber must circulate.
-    if (_flags.solarEnabled && _solarTempCb) {
+    // ---- Solar sensors + overheat protection (Priority 0) ------------------
+    // Runs the pump only in AUTO and never on a latched pump alarm: OFF usually means
+    // someone works at the pump, and after a dry run there is no water to circulate.
+    // The collector has its own vent valve. "Hot" is still reported in every mode.
+    bool hot = false;
+    if (_solarActive()) {
         float absorber = _solarTempCb();
-        if (absorber > _solarSafetyTemp) {
-            if (!_flags.solarSafetyActive) {
-                _flags.solarSafetyActive = 1;
-                _fireStatus(F("Solar safety: absorber hot"));
-            }
-            if (_pumpState == IDLE)     _startPumpSequence(now);
-            if (_flags.solarValveEnabled) _setRelay(3, true);
-            return;  // skip normal engine while safety is active
+        float pool     = _poolTempCb ? _poolTempCb() : -127.0f;
+        bool  ok       = _tempValid(absorber) && _tempValid(pool);
+        if (ok == (bool)_flags.solarSensorFault) {
+            _flags.solarSensorFault = !ok;
+            if (ok) _fireStatus(F("Solar sensor OK"));
+            else    _fireStatus(F("Solar sensor fault"));
         }
-        if (_flags.solarSafetyActive) {
-            _flags.solarSafetyActive = 0;
-            _fireStatus(F("Solar safety: absorber cooled"));
-        }
+        hot = ok && absorber > _solarSafetyTemp;
+    } else {
+        _flags.solarSensorFault = 0;
+    }
+    if (hot != (bool)_flags.solarSafetyActive) {
+        _flags.solarSafetyActive = hot;
+        if (hot) _fireStatus(F("Solar safety: absorber hot"));
+        else     _fireStatus(F("Solar safety: absorber cooled"));
+    }
+    if (hot && _manualMode == AUTO && !_flags.alarmActive) {
+        if (_pumpState == IDLE) _startPumpSequence(now);
+        _setValve(_flags.solarMode == SOLAR_VALVE, now);
+        return;  // skip normal engine while protection runs
     }
 
     // ---- Freeze cycle phase management -------------------------------------
@@ -279,11 +395,6 @@ void ApaPump::update() {
                         (now - _pumpStopMs >= (uint32_t)APAPUMP_MIN_OFF_SEC * 1000UL);
         if (minOffOk) {
             _startPumpSequence(now);
-            // Solar valve: open when solar drives; closed in manual mode (max pressure)
-            if (_flags.solarValveEnabled) {
-                bool valveOn = (_flags.solarEnabled && _manualMode == AUTO && _flags.solarRunning);
-                _setRelay(3, valveOn);
-            }
         }
 
     } else if (!wantPump && _pumpState == RUNNING) {
@@ -292,13 +403,19 @@ void ApaPump::update() {
                         (now - _pumpStartMs >= (uint32_t)_minRunTimeSec * 1000UL);
         if (minRunOk) {
             _stopPumpSequence(now);
-            if (_flags.solarValveEnabled) _setRelay(3, false);
         }
 
     } else if (!wantPump && _pumpState == IDLE && _flags.solarRunning) {
         // Solar no longer wants to run — clear the solar hysteresis flag
         _flags.solarRunning = 0;
+        _flags.solarHeating = 0;
     }
+
+    // ---- Solar valve follows demand, also during a run (schedule + solar) ---
+    // Closed in manual mode — the operator needs full pressure (vacuuming).
+    _setValve((_pumpState == STARTING || _pumpState == RUNNING) &&
+              _flags.solarMode == SOLAR_VALVE && _solarActive() &&
+              _manualMode == AUTO && _flags.solarRunning, now);
 }
 
 // ============================================================================
@@ -317,8 +434,16 @@ bool ApaPump::_shouldPumpRun() {
 
     // Priority 4: freeze protection — pool temp below threshold, water confirmed
     if (_flags.freezeEnabled && _freezeTempCb) {
-        float t = _freezeTempCb();
-        if (t >= 0.0f && t < _freezeThresholdC) {
+        float t     = _freezeTempCb();
+        bool  valid = _tempValid(t);
+        // Ends only on a valid reading above threshold + hysteresis: an invalid reading
+        // ("not ready", sensor lost) must never switch an active freeze protection off.
+        if (_flags.freezeActive && valid && t >= _freezeThresholdC + APAPUMP_FREEZE_HYST_C) {
+            _flags.freezeActive  = 0;
+            _flags.freezeCycleOn = 0;
+            _fireStatus(F("Freeze protection deactivated"));
+        }
+        if (_flags.freezeActive || (valid && t < _freezeThresholdC)) {
             // Dry-run interlock: if pressure EMA established and shows no flow, suppress
             bool waterPresent = true;
             if (_flags.pressureEnabled && _lastPressure >= 0.0f &&
@@ -334,16 +459,14 @@ bool ApaPump::_shouldPumpRun() {
                 }
                 return _flags.freezeCycleOn;
             }
-        } else if (_flags.freezeActive) {
-            _flags.freezeActive  = 0;
-            _flags.freezeCycleOn = 0;
-            _fireStatus(F("Freeze protection deactivated"));
         }
     }
 
-    // Solar enabled: solar is the on/off driver
-    if (_flags.solarEnabled) {
+    // Solar: extra demand on top of the schedule (default), or the only driver with
+    // catch-up (SOLAR_WITH_CATCHUP, 1.2.0 behaviour).
+    if (_solarActive()) {
         if (_solarWantsRun()) return true;
+        if (_flags.solarDrive == SOLAR_WITH_SCHEDULE) return _scheduleCb && _scheduleCb();
         // Priority 5: catch-up deficit
         uint16_t target = _dailyTargetMin;
         if (target == 0 && _dailyTargetCb) target = _dailyTargetCb();
@@ -361,30 +484,31 @@ bool ApaPump::_shouldPumpRun() {
         return false;
     }
 
-    // Solar disabled: schedule drives
+    // No solar: schedule drives
     if (_scheduleCb && _scheduleCb()) return true;
 
     return false;
 }
 
 bool ApaPump::_solarWantsRun() {
-    if (!_solarTempCb) return false;
-
     float absorber = _solarTempCb();
-    float pool     = _poolTempCb ? _poolTempCb() : 0.0f;
+    float pool     = _poolTempCb ? _poolTempCb() : -127.0f;
+    // No control on a bad reading, and no extra solar runs on a latched pump alarm
+    // (after a dry run there is no water to circulate - same rule as overheat protection).
+    if (_flags.alarmActive || !_tempValid(absorber) || !_tempValid(pool)) {
+        _flags.solarRunning = 0;
+        _flags.solarHeating = 0;
+        return false;
+    }
 
     // Day/night gate — cooling allowed at night, heating only during day
-    bool isDaytime = true;
-    if (_flags.solarDayNight && _solarEpochCb) {
-        uint32_t epoch = _solarEpochCb();
-        uint8_t  hour  = (uint8_t)((epoch % 86400UL) / 3600UL);
-        isDaytime = (hour >= _solarDayStartHour && hour < _solarNightStartHour);
-    }
+    bool isDaytime = _solarDaytime();
 
     // Pool cooling: pool overheated, absorber is cooler
     if (_solarMaxPoolTemp > 0.0f && pool > _solarMaxPoolTemp) {
         if (absorber < pool - _solarCoolDelta) {
             _flags.solarRunning = 1;
+            _flags.solarHeating = 0;
             return true;
         }
     }
@@ -398,6 +522,7 @@ bool ApaPump::_solarWantsRun() {
                                  absorber < pool - _solarCoolDelta);
             if (!stillCooling) {
                 _flags.solarRunning = 0;
+                _flags.solarHeating = 0;
                 return false;
             }
         }
@@ -408,6 +533,7 @@ bool ApaPump::_solarWantsRun() {
         // Currently running — stop at stopDelta (hysteresis lower edge)
         if (absorber < pool + _solarStopDelta) {
             _flags.solarRunning = 0;
+            _flags.solarHeating = 0;
             return false;
         }
         return true;
@@ -416,6 +542,7 @@ bool ApaPump::_solarWantsRun() {
         bool poolNotOverheated = (_solarMaxPoolTemp <= 0.0f || pool < _solarMaxPoolTemp);
         if (absorber > pool + _solarStartDelta && poolNotOverheated) {
             _flags.solarRunning = 1;
+            _flags.solarHeating = 1;
             return true;
         }
         return false;
@@ -446,13 +573,15 @@ void ApaPump::_stopPumpSequence(uint32_t now) {
     _pumpStopMs = now;
 
     // AUX off at start of STOPPING sequence
+    bool auxWasOn = _flags.auxRunning;
     if (_flags.auxEnabled && _flags.auxRunning && _id[2] != 0xFF) {
         _setRelay(2, false);
         _flags.auxRunning = 0;
+        _auxChangeMs      = now;
     }
 
-    // If no AUX stop lead needed, go straight to turning pump off
-    if (!_flags.auxEnabled || _auxStopLeadS == 0) {
+    // No AUX stop lead needed (none set, or a heater that was already off) -> pump off now
+    if (!_flags.auxEnabled || _auxStopLeadS == 0 || (_heaterMode() && !auxWasOn)) {
         _setRelay(0, false);
         _pumpStopMs = now;   // reset: now tracks pump-off time for UVC post-delay
         if (_stateChangeCb) _stateChangeCb(false);
@@ -482,11 +611,14 @@ void ApaPump::_updateFollowers(uint32_t now) {
             break;
 
         case RUNNING:
-            // AUX start delay: turn AUX on after pump has run long enough for flow
-            if (_flags.auxEnabled && !_flags.auxRunning && _id[2] != 0xFF) {
-                if (now - _pumpStartMs >= (uint32_t)_auxStartDelayS * 1000UL) {
-                    _setRelay(2, true);
-                    _flags.auxRunning = 1;
+            // AUX on after the pump has run long enough for flow (start delay)
+            if (_flags.auxEnabled && _id[2] != 0xFF) {
+                bool want = (now - _pumpStartMs >= (uint32_t)_auxStartDelayS * 1000UL);
+                if (_heaterMode()) want = want && _heaterWanted(now);
+                if (want != (bool)_flags.auxRunning) {
+                    _setRelay(2, want);
+                    _flags.auxRunning = want;
+                    _auxChangeMs      = now;
                 }
             }
             break;
@@ -726,7 +858,7 @@ void ApaPump::setManualMode(ManualMode m) {
     _manualSetMs    = millis();
     _lastReminderMs = _manualSetMs;
     // Close solar valve immediately in manual mode — operator needs full pressure (vacuuming)
-    if (m != AUTO && _flags.solarValveEnabled) _setRelay(3, false);
+    if (m != AUTO) _setValve(false, _manualSetMs);
     if (m == AUTO) _fireStatus(F("Pump: AUTO restored"));
     else           _fireStatus(F("Pump: MANUAL mode"));
 }
@@ -765,7 +897,11 @@ void ApaPump::enableAux(uint16_t startDelayS, uint16_t stopLeadS) {
     if (_id[2] == 0xFF) return;
     _auxStartDelayS = startDelayS;
     _auxStopLeadS   = stopLeadS;
-    _flags.auxEnabled = 1;
+    if (!_flags.savedSettings) {   // first boot; saved mode wins
+        _flags.auxMode = AUX_FOLLOWER;
+        if (_flags.ready) _saveEEPROM();
+    }
+    _flags.auxEnabled = (_flags.auxMode != AUX_DISABLED);
 }
 
 void ApaPump::enableSolar(
@@ -776,11 +912,15 @@ void ApaPump::enableSolar(
     ValveMode valveMode, uint16_t pulseDurationMs
 ) {
     _solarTempCb           = solarTempCb;
-    _poolTempCb            = poolTempCb;
-    _flags.solarValveEnabled = (useValve && _id[3] != 0xFF) ? 1 : 0;
+    if (poolTempCb) _poolTempCb = poolTempCb;   // else keep setPoolTempCallback()
+    _flags.solarValveEnabled = (_id[3] != 0xFF) ? 1 : 0;   // valve relay wired
     _solarStartDelta       = startDelta;
     _solarStopDelta        = stopDelta;
-    _solarMaxPoolTemp      = maxPoolTemp;
+    if (!_flags.savedSettings) {   // first boot: defaults from the sketch, else saved values win
+        _solarMaxPoolTemp = maxPoolTemp;
+        _flags.solarMode  = (useValve && _flags.solarValveEnabled) ? SOLAR_VALVE : SOLAR_PUMP;
+        if (_flags.ready) _saveEEPROM();
+    }
     _solarCoolDelta        = coolDelta;
     _solarSafetyTemp       = safetyTemp;
     _solarValveMode        = valveMode;
@@ -809,7 +949,7 @@ void ApaPump::resetCurrentBaseline() {
 void ApaPump::enablePressure(float (*pressureCb)(), float maxPressure) {
     _pressureCb            = pressureCb;
     _maxPressure           = maxPressure;
-    _flags.pressureEnabled = 1;
+    _flags.pressureEnabled = !_pressureUserOff;   // a saved setPressureEnabled(false) wins
 }
 
 // Clearing _lastPressure matters: update() only overwrites it with valid readings, so a
@@ -817,6 +957,8 @@ void ApaPump::enablePressure(float (*pressureCb)(), float maxPressure) {
 void ApaPump::setPressureEnabled(bool on) {
     if (on && !_pressureCb) return;   // enablePressure() was never called
     _flags.pressureEnabled  = on ? 1 : 0;
+    _pressureUserOff        = !on;
+    if (_flags.ready) _saveEEPROM();
     if (on) return;
     _lastPressure           = -1.0f;
     _pressureEmaNormal      = 0.0f;
@@ -905,6 +1047,8 @@ void ApaPump::_loadEEPROM() {
     for (uint8_t i = 0; i < sizeof(d) - 1; i++) cs += p[i];
 
     if (d.magic != EEPROM_MAGIC || d.version != EEPROM_VERSION || cs != d.checksum) {
+        // First boot (or older layout): the solar/AUX/Max pool values set by enable*() so far
+        // are the defaults; enable*() called after begin() save their defaults themselves.
         _dailyTargetMin      = 0;
         _yesterdayRuntimeMin = 0;
         _minRunTimeSec       = APAPUMP_MIN_RUN_SEC;
@@ -917,6 +1061,17 @@ void ApaPump::_loadEEPROM() {
     _yesterdayRuntimeMin = d.yesterdayRuntimeMin;
     _minRunTimeSec       = d.minRunTimeSec;
     _cleanPressure       = (float)d.cleanPressure100 / 100.0f;
+    _pressureUserOff     = !(d.settings & 0x01);
+    if (_pressureCb) _flags.pressureEnabled = !_pressureUserOff;
+    _flags.solarMode     = (d.settings >> 1) & 0x03;
+    if (_flags.solarMode > SOLAR_VALVE) _flags.solarMode = SOLAR_OFF;
+    _flags.auxMode       = (d.settings >> 3) & 0x03;
+    // A saved mode never switches on a relay this sketch did not register: only when
+    // enableAux() already ran (enableAux() / setAuxMode() after begin() decide themselves).
+    if (_flags.auxEnabled) _flags.auxEnabled = (_flags.auxMode != AUX_DISABLED);
+    _solarMaxPoolTemp    = d.solarMaxPoolC;
+    _heaterTargetC       = constrain(d.heaterTargetC, APAPUMP_HEATER_TARGET_MIN, APAPUMP_HEATER_TARGET_MAX);
+    _flags.savedSettings = 1;
 }
 
 void ApaPump::_saveEEPROM() {
@@ -927,6 +1082,9 @@ void ApaPump::_saveEEPROM() {
     d.yesterdayRuntimeMin = _yesterdayRuntimeMin;
     d.minRunTimeSec       = _minRunTimeSec;
     d.cleanPressure100    = (uint16_t)(_cleanPressure * 100.0f);
+    d.settings            = (_pressureUserOff ? 0 : 0x01) | (_flags.solarMode << 1) | (_flags.auxMode << 3);
+    d.solarMaxPoolC       = (uint8_t)_solarMaxPoolTemp;
+    d.heaterTargetC       = _heaterTargetC;
 
     uint8_t cs = 0;
     const uint8_t* p = reinterpret_cast<const uint8_t*>(&d);
