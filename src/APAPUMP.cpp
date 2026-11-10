@@ -201,6 +201,12 @@ bool ApaPump::_heaterWanted(uint32_t now) const {
     return want;
 }
 
+// Manual OFF means "stop now" (someone works at the pump), and a pump running dry or
+// overloaded must not keep running for the heat pump's after-run (1.3.1).
+bool ApaPump::_skipAfterRun() const {
+    return _manualMode == FORCE_OFF || _flags.alarmActive;
+}
+
 bool ApaPump::_solarDaytime() const {
     if (!_flags.solarDayNight || !_solarEpochCb) return true;
     uint8_t hour = (uint8_t)((_solarEpochCb() % 86400UL) / 3600UL);
@@ -580,8 +586,8 @@ void ApaPump::_stopPumpSequence(uint32_t now) {
         _auxChangeMs      = now;
     }
 
-    // No AUX stop lead needed (none set, or a heater that was already off) -> pump off now
-    if (!_flags.auxEnabled || _auxStopLeadS == 0 || (_heaterMode() && !auxWasOn)) {
+    // No AUX stop lead needed (none set, a heater that was already off, or OFF / an alarm) -> pump off now
+    if (!_flags.auxEnabled || _auxStopLeadS == 0 || (_heaterMode() && !auxWasOn) || _skipAfterRun()) {
         _setRelay(0, false);
         _pumpStopMs = now;   // reset: now tracks pump-off time for UVC post-delay
         if (_stateChangeCb) _stateChangeCb(false);
@@ -625,8 +631,8 @@ void ApaPump::_updateFollowers(uint32_t now) {
 
         case STOPPING:
             if (_isRelayOn(0)) {
-                // Phase A — pump still running, waiting for AUX stop lead
-                if (now - _pumpStopMs >= (uint32_t)_auxStopLeadS * 1000UL) {
+                // Phase A — pump still running, waiting for AUX stop lead (cut short by OFF / an alarm)
+                if (now - _pumpStopMs >= (uint32_t)_auxStopLeadS * 1000UL || _skipAfterRun()) {
                     _setRelay(0, false);
                     _pumpStopMs = now;   // reset: now tracks pump-off time for UVC post-delay
                     if (_stateChangeCb) _stateChangeCb(false);

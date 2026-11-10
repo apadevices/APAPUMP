@@ -1,5 +1,21 @@
 # Changelog — APAPUMP
 
+## [1.3.1] — 2026-11-10
+
+### Fixed
+
+- **`FORCE_OFF` and a latched pump alarm no longer wait for the AUX after-run** (`enableAux()`'s
+  `stopLeadS`). Before, with AUX on, the stop switched AUX off and kept the pump running for the lead —
+  e.g. 120 s with a heat pump. Manual OFF should stop at once (someone may be working at the pump), and a
+  sketch that stops the pump on a dry-run / high-pressure / overload alarm (as the README recommends) left it
+  running dry or overloaded for the whole lead. Now AUX and the pump go off together; an after-run already
+  counting is cut short. Normal stops (schedule end, solar run end) keep the after-run. UVC still gets its
+  post-delay. Found on the APA-CONTROLLER bench.
+
+### Footprint
+
+- Mega: +0 B RAM, +32 B flash (example 05 and APA-CONTROLLER). Built on the Mega only (patch to the stop sequence).
+
 ## [1.3.0] — 2026-11-09
 
 ### Behaviour changes (read before updating)

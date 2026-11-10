@@ -1,4 +1,4 @@
-# APAPUMP API Reference — v1.3.0
+# APAPUMP API Reference — v1.3.1
 
 ## Quick-start examples
 
@@ -158,7 +158,7 @@ void setManualMode(ManualMode m);
 | Value | Behaviour |
 |-------|-----------|
 | `FORCE_ON` | Pump forced on. All timing guards suspended. Solar valve closes immediately. |
-| `FORCE_OFF` | Pump forced off. All timing guards suspended. Solar overheat protection is skipped (since 1.3.0; it runs only in `AUTO`). |
+| `FORCE_OFF` | Pump forced off. All timing guards suspended. Solar overheat protection is skipped (since 1.3.0; it runs only in `AUTO`). Stops without the AUX after-run: AUX and the pump go off together (since 1.3.1). |
 | `AUTO` | Return to automatic control. Fires status callback. |
 
 ---
@@ -218,7 +218,7 @@ Returns the current state machine state.
 | `IDLE` | Pump off, waiting for a start request |
 | `STARTING` | UVC pre-delay in progress — pump not yet on |
 | `RUNNING` | Pump relay on |
-| `STOPPING` | AUX lead + UVC post-delay in progress |
+| `STOPPING` | AUX lead + UVC post-delay in progress (no AUX lead on `FORCE_OFF` or a pump alarm) |
 
 ---
 
@@ -352,7 +352,7 @@ Enable UVC sanitizer relay (PCF P1 / DIRECT pin b). UVC turns ON `preDelayS` sec
 void enableAux(uint16_t startDelayS = 10, uint16_t stopLeadS = 30);
 ```
 
-Enable AUX device relay (PCF P2 / DIRECT pin c — heat pump, ozone, etc.). AUX turns ON `startDelayS` seconds after pump starts; turns OFF `stopLeadS` seconds before pump stops (= the pump's after-run; heat pumps usually want 60–180 s). No-op if aux pin is `0xFF`. First-boot mode `AUX_FOLLOWER` (1.2.0 behaviour); a saved `setAuxMode()` wins.
+Enable AUX device relay (PCF P2 / DIRECT pin c — heat pump, ozone, etc.). AUX turns ON `startDelayS` seconds after pump starts; turns OFF `stopLeadS` seconds before pump stops (= the pump's after-run; heat pumps usually want 60–180 s). No after-run when the stop comes from `FORCE_OFF` or a latched pump alarm — AUX and the pump go off together, and an after-run already counting is cut short (since 1.3.1). No-op if aux pin is `0xFF`. First-boot mode `AUX_FOLLOWER` (1.2.0 behaviour); a saved `setAuxMode()` wins.
 
 ---
 
@@ -376,7 +376,8 @@ gate) and the collector is not above `safetyTemp` (solar first) · the permit ca
 any) returns `true` · the pool is not above Max pool (when set and valid). `HEATER_FULL` adds: valid pool
 reading, on below target − `APAPUMP_HEATER_HYST_C`, off at the target. Minimum ON/OFF time
 `APAPUMP_HEATER_MIN_ON_SEC` / `APAPUMP_HEATER_MIN_OFF_SEC` (600 s), also after power-up; a pump alarm or
-pump stop ends it at once. No extra pump runs are requested. In heater modes the stop lead is skipped when AUX was already off.
+pump stop ends it at once. No extra pump runs are requested. In heater modes the stop lead is skipped when AUX was already off;
+in every AUX mode it is skipped on `FORCE_OFF` and on a latched pump alarm (since 1.3.1).
 
 ---
 
@@ -870,7 +871,7 @@ Use it for your own first-boot defaults: `if (!pump.hasSavedSettings()) pump.set
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `APAPUMP_VERSION` | `"1.3.0"` | Library version string |
+| `APAPUMP_VERSION` | `"1.3.1"` | Library version string |
 | `APAPUMP_MIN_OFF_SEC` | 60 | Minimum pause after pump stops (non-manual) |
 | `APAPUMP_MIN_RUN_SEC` | 300 | Default minimum run time before stopping |
 | `APAPUMP_VALVE_PULSE_MS` | 500 | Default pulse width for `VALVE_PULSE` mode |

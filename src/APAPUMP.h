@@ -27,7 +27,7 @@
 #include <Wire.h>
 
 // ---- Version ----------------------------------------------------------------
-#define APAPUMP_VERSION "1.3.0"
+#define APAPUMP_VERSION "1.3.1"
 
 // ---- EEPROM base address (15 bytes: 520–534) --------------------------------
 // APA library address map — do not overlap these ranges:
@@ -281,6 +281,7 @@ public:
 
     /** AUX device relay (PCF P2 or DIRECT pin c — heat pump, ozone, etc.):
      *  ON startDelayS after pump starts, OFF stopLeadS before pump stops (= after-run).
+     *  No after-run when the stop comes from FORCE_OFF or a latched pump alarm (since 1.3.1).
      *  First-boot mode AUX_FOLLOWER; see setAuxMode() for the heater modes. */
     void enableAux(uint16_t startDelayS = 10, uint16_t stopLeadS = 30);
 
@@ -627,6 +628,7 @@ private:
     bool _solarWantsRun();
     bool _solarActive() const;                 // enableSolar() called, mode not OFF
     bool _solarDaytime() const;                // inside setSolarDayNight() hours (true if none)
+    bool _skipAfterRun() const;                // FORCE_OFF or a latched pump alarm: stop without the AUX lead
     void _setValve(bool open, uint32_t now);   // stamps _valveChangeMs on a real change
     bool _heaterMode() const;                  // HEATER_SIMPLE or HEATER_FULL
     bool _heaterWanted(uint32_t now) const;    // heater rules incl. min ON/OFF guard

@@ -5,7 +5,7 @@
 </p>
 
 **Autonomous filtration pump controller for APA Devices pool automation**
-· ![v1.3.0](https://img.shields.io/badge/version-1.3.0-blue)
+· ![v1.3.1](https://img.shields.io/badge/version-1.3.1-blue)
 · ![Platforms](https://img.shields.io/badge/platforms-AVR%20ESP8266%20ESP32%20STM32-brightgreen)
 
 ---
@@ -114,9 +114,14 @@ Out of the box, the zero-arg constructor targets the APA Devices HMI board v1.0:
                          [ STOPPING ]                              │
                                 │                                  │
           AUX lead ──► pump OFF ──► UVC post-delay ────────────────┘
+          (no AUX lead on FORCE_OFF or a pump alarm: AUX + pump OFF at once)
 ```
 
 **Guards that bypass min-run time:** `FORCE_ON` and `FORCE_OFF` — manual mode suspends timing guards.
+
+**Stops without the AUX lead (since 1.3.1):** `FORCE_OFF` and a latched pump alarm switch AUX and the
+pump off together — OFF means stop now, and a pump running dry or overloaded must not keep running for an
+after-run. Coming during a running lead, they cut it short. UVC still gets its post-delay.
 
 ### Follower timing
 
@@ -130,6 +135,7 @@ AUX:                           ON───────────────OF
 ```
 
 `Ts` = moment the stop sequence begins. `pre` = `enableUVC(preDelayS, …)`. `lead` = `enableAux(…, stopLeadS)`. `post` = `enableUVC(…, postDelayS)`.
+With `FORCE_OFF` or a latched pump alarm there is no `lead`: AUX and the pump go off at `Ts` (since 1.3.1).
 
 ### Priority engine
 
@@ -392,7 +398,8 @@ reading. A 10-minute minimum ON and OFF time (`APAPUMP_HEATER_MIN_ON_SEC` / `_MI
 compressor — also after power-up, so the heater waits 10 min after a (re)boot; a pump alarm or a pump stop
 always switches it off at once. The heater never asks for extra
 pump runs — it heats during your filtration schedule. When the heater was already off, the pump stops
-without the after-run. `isHeaterOn()` reports the relay.
+without the after-run. `FORCE_OFF` and a pump alarm also stop the pump without the after-run (since
+1.3.1) — the heat pump's own flow switch protects it then. `isHeaterOn()` reports the relay.
 
 In `HEATER_FULL` set the heat pump's own thermostat to its maximum — otherwise the lower of the two settings wins.
 
@@ -722,6 +729,7 @@ Compiled with the `01_minimal` example. Zero errors, zero library warnings on al
 | STM32 Bluepill | STM32F103C8 | 2 644 B | 20 480 B (12.9%) | 27 096 B | 65 536 B (41.3%) |
 
 All five examples build on all five platforms (1.3.0). Against 1.2.0: +13–16 B RAM, about +1.5 KB flash.
+1.3.1 (stop-sequence patch) was built on the Mega only: +0 B RAM, +32 B flash.
 
 > The Uno row uses 28.2% RAM — that is the library with all Phase 2 features **registered** in the example. A minimal sketch (no solar, no pressure, no freeze) sits below 20%. ESP32 and ESP8266 totals include the full Arduino framework regardless of use.
 
