@@ -5,7 +5,7 @@
 </p>
 
 **Autonomous filtration pump controller for APA Devices pool automation**
-· ![v1.3.2](https://img.shields.io/badge/version-1.3.2-blue)
+· ![v1.3.3](https://img.shields.io/badge/version-1.3.3-blue)
 · ![Platforms](https://img.shields.io/badge/platforms-AVR%20ESP8266%20ESP32%20STM32-brightgreen)
 
 ---
@@ -321,6 +321,10 @@ pump.setSolarMode(SOLAR_OFF);         // or SOLAR_PUMP (no valve) / SOLAR_VALVE
 pump.setSolarMaxPool(30);             // °C; 0 = no limit — no cooling AND no heating cap
 ```
 
+- **Max pool is a cap:** solar heating does not start at or above Max pool, and a running heating run
+  ends once the pool reaches it (since 1.3.3; before, a running run continued until the collector cooled,
+  so the pool could end above Max pool). It may start again below Max pool − `APAPUMP_SOLAR_MAX_POOL_HYST_C`
+  (0.5 °C). Above Max pool cooling runs when the collector is `coolDelta` colder than the pool.
 - **`SOLAR_PUMP`** — no valve: solar only switches the filtration pump; the collector is always in the loop.
 - **`SOLAR_VALVE`** — a 3-way valve on P3. Without a valve relay it is stored as `SOLAR_PUMP`.
 - **Valve settle:** after every valve change the pressure checks and baseline learning pause for
@@ -732,6 +736,7 @@ Compiled with the `01_minimal` example. Zero errors, zero library warnings on al
 All five examples build on all five platforms (1.3.0). Against 1.2.0: +13–16 B RAM, about +1.5 KB flash.
 1.3.1 (stop-sequence patch) was built on the Mega only: +0 B RAM, +32 B flash.
 1.3.2 (heater cut by overheat protection) was built on AVR (Mega, Uno) only: +0 B RAM, +10 B flash.
+1.3.3 (Max pool ends a running heating run) was built on AVR (Mega, Uno) only: +0 B RAM, +54 B flash.
 
 > The Uno row uses 28.2% RAM — that is the library with all Phase 2 features **registered** in the example. A minimal sketch (no solar, no pressure, no freeze) sits below 20%. ESP32 and ESP8266 totals include the full Arduino framework regardless of use.
 

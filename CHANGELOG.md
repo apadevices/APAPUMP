@@ -1,5 +1,20 @@
 # Changelog — APAPUMP
 
+## [1.3.3] — 2026-11-11
+
+### Fixed
+
+- **Max pool now ends a running solar heating run.** Before, Max pool only blocked a heating run from
+  starting: a run already going continued until the collector was less than `stopDelta` warmer than the
+  pool, so on a sunny afternoon the pool could end above Max pool. Now the run ends once the pool reaches
+  Max pool, and heating may start again below Max pool − `APAPUMP_SOLAR_MAX_POOL_HYST_C` (new, 0.5 °C,
+  `#ifndef`) so it does not toggle at the limit. Cooling above Max pool is unchanged. Found by the
+  APA-CONTROLLER manual review.
+
+### Footprint
+
+- +0 B RAM, +54 B flash (example 05). Built on AVR only (Mega, Uno; patch to the solar heating rule).
+
 ## [1.3.2] — 2026-11-11
 
 ### Fixed

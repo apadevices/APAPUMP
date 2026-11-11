@@ -27,7 +27,7 @@
 #include <Wire.h>
 
 // ---- Version ----------------------------------------------------------------
-#define APAPUMP_VERSION "1.3.2"
+#define APAPUMP_VERSION "1.3.3"
 
 // ---- EEPROM base address (15 bytes: 520–534) --------------------------------
 // APA library address map — do not overlap these ranges:
@@ -96,6 +96,9 @@ constexpr float    APAPUMP_PRESSURE_ABS_MIN    = 0.1f; // min pressure (bar) of 
 #endif
 #ifndef APAPUMP_FREEZE_HYST_C
 #define APAPUMP_FREEZE_HYST_C          1.0f   // freeze protection ends at threshold + 1.0 °C
+#endif
+#ifndef APAPUMP_SOLAR_MAX_POOL_HYST_C
+#define APAPUMP_SOLAR_MAX_POOL_HYST_C  0.5f   // heating stops at Max pool, may start again below Max pool - 0.5 °C
 #endif
 #ifndef APAPUMP_VALVE_SETTLE_SEC
 #define APAPUMP_VALVE_SETTLE_SEC       APAPUMP_CURRENT_SETTLE_SEC  // no pressure checks/learning after a valve change

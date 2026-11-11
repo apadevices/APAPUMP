@@ -538,8 +538,10 @@ bool ApaPump::_solarWantsRun() {
     }
 
     if (_flags.solarRunning) {
-        // Currently running — stop at stopDelta (hysteresis lower edge)
-        if (absorber < pool + _solarStopDelta) {
+        // Currently running — stop at stopDelta (hysteresis lower edge), or once the pool has
+        // reached Max pool: Max pool is a real cap, not only a start condition (1.3.3)
+        bool poolAtMax = (_solarMaxPoolTemp > 0.0f && pool >= _solarMaxPoolTemp);
+        if (absorber < pool + _solarStopDelta || poolAtMax) {
             _flags.solarRunning = 0;
             _flags.solarHeating = 0;
             return false;
@@ -547,7 +549,8 @@ bool ApaPump::_solarWantsRun() {
         return true;
     } else {
         // Currently stopped — start at startDelta (hysteresis upper edge)
-        bool poolNotOverheated = (_solarMaxPoolTemp <= 0.0f || pool < _solarMaxPoolTemp);
+        bool poolNotOverheated = (_solarMaxPoolTemp <= 0.0f ||
+                                  pool < _solarMaxPoolTemp - APAPUMP_SOLAR_MAX_POOL_HYST_C);
         if (absorber > pool + _solarStartDelta && poolNotOverheated) {
             _flags.solarRunning = 1;
             _flags.solarHeating = 1;

@@ -1,4 +1,4 @@
-# APAPUMP API Reference — v1.3.2
+# APAPUMP API Reference — v1.3.3
 
 ## Quick-start examples
 
@@ -443,7 +443,7 @@ Registers the sensors and constants — call it every boot.
 | `useValve` | `false` | First-boot default: `true` → `SOLAR_VALVE`, `false` → `SOLAR_PUMP`. A saved `setSolarMode()` wins. |
 | `startDelta` | 8.0 | Start heating when collector > pool + startDelta (°C) |
 | `stopDelta` | 3.0 | Stop heating when collector < pool + stopDelta (°C). Must be < startDelta. |
-| `maxPoolTemp` | 0.0 | First-boot Max pool (°C, 0 = no limit). Above it: no solar heating, and cooling runs when collector < pool − coolDelta. A saved `setSolarMaxPool()` wins. |
+| `maxPoolTemp` | 0.0 | First-boot Max pool (°C, 0 = no limit). Solar heating stops at it — a running run ends once the pool reaches Max pool (since 1.3.3) and may start again below Max pool − `APAPUMP_SOLAR_MAX_POOL_HYST_C` (0.5 °C); above it cooling runs when collector < pool − coolDelta. A saved `setSolarMaxPool()` wins. |
 | `coolDelta` | 2.0 | Cooling dead-band (°C) |
 | `safetyTemp` | 50.0 | Overheat protection (°C): pump ON + valve OPEN — **only in `AUTO` and never during a pump alarm** (since 1.3.0). |
 | `valveMode` | `VALVE_SUSTAINED` | `VALVE_SUSTAINED`: valve relay stays on while open. `VALVE_PULSE`: hardware stub, not implemented. |
@@ -476,7 +476,9 @@ void    setSolarMaxPool(uint8_t celsius);   // saved; 0 = no limit
 uint8_t getSolarMaxPool() const;
 ```
 
-Whole °C. 0 = no limit — **no cooling and no heating cap**. Also caps both heater modes.
+Whole °C. 0 = no limit — **no cooling and no heating cap**. Solar heating ends once the pool reaches it (also a
+run already going, since 1.3.3) and restarts below Max pool − `APAPUMP_SOLAR_MAX_POOL_HYST_C`. Also caps both
+heater modes (heater off while the pool is above it).
 
 ---
 
@@ -872,7 +874,7 @@ Use it for your own first-boot defaults: `if (!pump.hasSavedSettings()) pump.set
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `APAPUMP_VERSION` | `"1.3.2"` | Library version string |
+| `APAPUMP_VERSION` | `"1.3.3"` | Library version string |
 | `APAPUMP_MIN_OFF_SEC` | 60 | Minimum pause after pump stops (non-manual) |
 | `APAPUMP_MIN_RUN_SEC` | 300 | Default minimum run time before stopping |
 | `APAPUMP_VALVE_PULSE_MS` | 500 | Default pulse width for `VALVE_PULSE` mode |
@@ -901,6 +903,7 @@ Set in `build_flags` (PlatformIO) so the library and your sketch see the same va
 | `APAPUMP_FREEZE_HYST_C` | 1.0 | Freeze protection ends at threshold + this (°C) |
 | `APAPUMP_VALVE_SETTLE_SEC` | 30 | No pressure checks / learning after a valve change (s) |
 | `APAPUMP_HEATER_HYST_C` | 1.0 | `HEATER_FULL`: on below target − this (°C) |
+| `APAPUMP_SOLAR_MAX_POOL_HYST_C` | 0.5 | Solar heating stops at Max pool, may start again below Max pool − this (°C) (since 1.3.3) |
 | `APAPUMP_HEATER_MIN_ON_SEC` / `_MIN_OFF_SEC` | 600 / 600 | Heater short-cycling guard (s) |
 | `APAPUMP_HEATER_TARGET_DEFAULT` | 28 | First-boot heater target (°C) |
 
