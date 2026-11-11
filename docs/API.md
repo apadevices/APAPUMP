@@ -1,4 +1,4 @@
-# APAPUMP API Reference — v1.3.1
+# APAPUMP API Reference — v1.3.2
 
 ## Quick-start examples
 
@@ -375,8 +375,9 @@ solar is not heating, could not heat right now (valid collector above pool + sta
 gate) and the collector is not above `safetyTemp` (solar first) · the permit callback (if
 any) returns `true` · the pool is not above Max pool (when set and valid). `HEATER_FULL` adds: valid pool
 reading, on below target − `APAPUMP_HEATER_HYST_C`, off at the target. Minimum ON/OFF time
-`APAPUMP_HEATER_MIN_ON_SEC` / `APAPUMP_HEATER_MIN_OFF_SEC` (600 s), also after power-up; a pump alarm or
-pump stop ends it at once. No extra pump runs are requested. In heater modes the stop lead is skipped when AUX was already off;
+`APAPUMP_HEATER_MIN_ON_SEC` / `APAPUMP_HEATER_MIN_OFF_SEC` (600 s), also after power-up; a pump alarm, a
+pump stop or running overheat protection (`AUTO`, collector above `safetyTemp`; since 1.3.2) ends it at once.
+When normal solar heating takes over, a running heater finishes its minimum ON time. No extra pump runs are requested. In heater modes the stop lead is skipped when AUX was already off;
 in every AUX mode it is skipped on `FORCE_OFF` and on a latched pump alarm (since 1.3.1).
 
 ---
@@ -871,7 +872,7 @@ Use it for your own first-boot defaults: `if (!pump.hasSavedSettings()) pump.set
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `APAPUMP_VERSION` | `"1.3.1"` | Library version string |
+| `APAPUMP_VERSION` | `"1.3.2"` | Library version string |
 | `APAPUMP_MIN_OFF_SEC` | 60 | Minimum pause after pump stops (non-manual) |
 | `APAPUMP_MIN_RUN_SEC` | 300 | Default minimum run time before stopping |
 | `APAPUMP_VALVE_PULSE_MS` | 500 | Default pulse width for `VALVE_PULSE` mode |

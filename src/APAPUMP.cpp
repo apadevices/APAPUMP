@@ -172,7 +172,9 @@ bool ApaPump::_heaterMode() const {
 
 // Heater rules (pump running past the AUX start delay is checked by the caller).
 bool ApaPump::_heaterWanted(uint32_t now) const {
-    if (_flags.alarmActive) return false;   // no flow = no heating, beats the min-ON guard
+    // Both beat the min-ON guard: a pump alarm (no flow = no heating), and running overheat
+    // protection (AUTO, collector above safetyTemp: it already pushes hot water into the pool) (1.3.2).
+    if (_flags.alarmActive || (_flags.solarSafetyActive && _manualMode == AUTO)) return false;
 
     float pool  = _poolTempCb ? _poolTempCb() : -127.0f;
     bool  valid = _tempValid(pool);

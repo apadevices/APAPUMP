@@ -1,5 +1,21 @@
 # Changelog — APAPUMP
 
+## [1.3.2] — 2026-11-11
+
+### Fixed
+
+- **Running overheat protection switches the heater off at once** (heater modes). Before, a heat pump that
+  was already on kept running for the rest of its 10-minute minimum ON time while the collector was above
+  `safetyTemp` and overheat protection pushed hot water into the pool. Now overheat protection beats the
+  minimum ON time, like a pump alarm; the 10-minute minimum OFF time follows. Only while the protection
+  really runs (`AUTO`, no pump alarm) — in `FORCE_OFF` / `FORCE_ON` the valve is closed and the heater keeps
+  its normal rules. When normal solar heating takes over, the heater still finishes its minimum ON time
+  (both heat the pool; the guard protects the compressor). Found on the APA-CONTROLLER bench.
+
+### Footprint
+
+- +0 B RAM, +10 B flash (example 05). Built on AVR only (Mega, Uno; patch to the heater rule).
+
 ## [1.3.1] — 2026-11-10
 
 ### Fixed

@@ -5,7 +5,7 @@
 </p>
 
 **Autonomous filtration pump controller for APA Devices pool automation**
-· ![v1.3.1](https://img.shields.io/badge/version-1.3.1-blue)
+· ![v1.3.2](https://img.shields.io/badge/version-1.3.2-blue)
 · ![Platforms](https://img.shields.io/badge/platforms-AVR%20ESP8266%20ESP32%20STM32-brightgreen)
 
 ---
@@ -395,8 +395,9 @@ not heat right now (collector above pool + startDelta, inside the day gate) and 
 over-hot (solar first) · the permit callback allows it (`setHeaterPermitCallback()`,
 e.g. a cheap-tariff input) · the pool is not above Max pool. `HEATER_FULL` also needs a valid pool
 reading. A 10-minute minimum ON and OFF time (`APAPUMP_HEATER_MIN_ON_SEC` / `_MIN_OFF_SEC`) protects the
-compressor — also after power-up, so the heater waits 10 min after a (re)boot; a pump alarm or a pump stop
-always switches it off at once. The heater never asks for extra
+compressor — also after power-up, so the heater waits 10 min after a (re)boot; a pump alarm, a pump stop
+or running overheat protection (AUTO, collector above the safety temperature — since 1.3.2) always switch it
+off at once. When normal solar heating takes over, a running heat pump finishes its minimum ON time. The heater never asks for extra
 pump runs — it heats during your filtration schedule. When the heater was already off, the pump stops
 without the after-run. `FORCE_OFF` and a pump alarm also stop the pump without the after-run (since
 1.3.1) — the heat pump's own flow switch protects it then. `isHeaterOn()` reports the relay.
@@ -730,6 +731,7 @@ Compiled with the `01_minimal` example. Zero errors, zero library warnings on al
 
 All five examples build on all five platforms (1.3.0). Against 1.2.0: +13–16 B RAM, about +1.5 KB flash.
 1.3.1 (stop-sequence patch) was built on the Mega only: +0 B RAM, +32 B flash.
+1.3.2 (heater cut by overheat protection) was built on AVR (Mega, Uno) only: +0 B RAM, +10 B flash.
 
 > The Uno row uses 28.2% RAM — that is the library with all Phase 2 features **registered** in the example. A minimal sketch (no solar, no pressure, no freeze) sits below 20%. ESP32 and ESP8266 totals include the full Arduino framework regardless of use.
 
